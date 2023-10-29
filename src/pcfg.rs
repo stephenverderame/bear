@@ -1,4 +1,4 @@
-use super::bare_c::{AExpr, BExpr, Statement};
+use super::bare_c::*;
 use strum::EnumCount;
 
 /// Probability space represented as a vector of floats of log probabilities
@@ -35,23 +35,27 @@ pub trait PCFG: Default {
     const COUNT: usize;
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct AExprPCFG {
-    choice: [f64; AExpr::COUNT],
-    seq: f64,
+    pub choice: [f64; AExpr::COUNT],
+    /// Probability of saving an expression for reuse
+    pub reuse: f64,
+    pub reuse_swap: f64,
 }
 
 impl PCFG for AExprPCFG {
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out.push(PSpace(self.choice.to_vec()));
-        out.push(PSpace(vec![self.seq]));
+        out.push(PSpace(vec![self.reuse]));
+        out.push(PSpace(vec![self.reuse_swap]));
         out
     }
 
     #[allow(clippy::int_plus_one)]
     fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>) {
         let res = Self {
-            seq: pop_singleton(&mut input),
+            reuse_swap: pop_singleton(&mut input),
+            reuse: pop_singleton(&mut input),
             choice: input
                 .pop()
                 .unwrap()
@@ -67,7 +71,8 @@ impl PCFG for AExprPCFG {
 
     fn uniform() -> Self {
         let mut res = Self {
-            seq: 0.5_f64.ln(),
+            reuse: 0.5_f64.ln(),
+            reuse_swap: 0.5_f64.ln(),
             ..Default::default()
         };
         #[allow(clippy::cast_precision_loss)]
@@ -80,11 +85,10 @@ impl PCFG for AExprPCFG {
     const COUNT: usize = AExpr::COUNT + 1;
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BExprPCFG {
-    choice: [f64; BExpr::COUNT],
-    seq: f64,
-    boolean: f64,
+    pub choice: [f64; BExpr::COUNT],
+    pub boolean: f64,
 }
 
 impl PCFG for BExprPCFG {
@@ -92,7 +96,6 @@ impl PCFG for BExprPCFG {
 
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out.push(PSpace(self.choice.to_vec()));
-        out.push(PSpace(vec![self.seq]));
         out.push(PSpace(vec![self.boolean]));
         out
     }
@@ -103,7 +106,6 @@ impl PCFG for BExprPCFG {
     {
         let res = Self {
             boolean: pop_singleton(&mut input),
-            seq: pop_singleton(&mut input),
             choice: input
                 .pop()
                 .unwrap()
@@ -119,7 +121,6 @@ impl PCFG for BExprPCFG {
 
     fn uniform() -> Self {
         let mut res = Self {
-            seq: 0.5_f64.ln(),
             boolean: 0.5_f64.ln(),
             ..Default::default()
         };
@@ -132,12 +133,12 @@ impl PCFG for BExprPCFG {
 }
 
 /// PCFG for an expression
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExprPCFG {
-    a_expr: AExprPCFG,
-    b_expr: BExprPCFG,
-    expr_type: f64,
-    seq: f64,
+    pub a_expr: AExprPCFG,
+    pub b_expr: BExprPCFG,
+    pub expr_type: f64,
+    pub seq: f64,
 }
 
 impl PCFG for ExprPCFG {
@@ -176,12 +177,70 @@ impl PCFG for ExprPCFG {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StmtPCFG {
+    pub choice: [f64; Statement::COUNT],
+}
+
+impl PCFG for StmtPCFG {
+    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
+        <[f64; Statement::COUNT]>::serialize(&self.choice, out)
+    }
+
+    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    where
+        Self: Sized,
+    {
+        let (choice, input) = <[f64; Statement::COUNT]>::deserialize(input);
+        (Self { choice }, input)
+    }
+
+    fn uniform() -> Self
+    where
+        Self: Sized,
+    {
+        Self {
+            choice: <[f64; Statement::COUNT]>::uniform(),
+        }
+    }
+
+    const COUNT: usize = Statement::COUNT;
+}
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoopStmtPCFG {
+    pub choice: [f64; LoopStatement::COUNT],
+}
+
+impl PCFG for LoopStmtPCFG {
+    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
+        <[f64; LoopStatement::COUNT]>::serialize(&self.choice, out)
+    }
+
+    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    where
+        Self: Sized,
+    {
+        let (choice, input) = <[f64; LoopStatement::COUNT]>::deserialize(input);
+        (Self { choice }, input)
+    }
+
+    fn uniform() -> Self
+    where
+        Self: Sized,
+    {
+        Self {
+            choice: <[f64; LoopStatement::COUNT]>::uniform(),
+        }
+    }
+
+    const COUNT: usize = LoopStatement::COUNT;
+}
+
 /// PCFG for an if statement
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct IfPCFG<P: PCFG> {
-    guard: BExprPCFG,
-    then: P,
-    otherwise: P,
+    pub guard: BExprPCFG,
+    pub child: P,
 }
 
 impl<P: PCFG> PCFG for IfPCFG<P> {
@@ -189,23 +248,17 @@ impl<P: PCFG> PCFG for IfPCFG<P> {
 
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out = self.guard.serialize(out);
-        out = self.then.serialize(out);
-        out = self.otherwise.serialize(out);
-        out
+        self.child.serialize(out)
     }
 
     fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
     where
         Self: Sized,
     {
-        // deserialize right to left
-        assert!(input.len() >= Self::COUNT);
         let mut res = Self::default();
-        let (otherwise, input) = P::deserialize(input);
-        let (then, input) = P::deserialize(input);
+        let (child, input) = P::deserialize(input);
         let (guard, input) = BExprPCFG::deserialize(input);
-        res.otherwise = otherwise;
-        res.then = then;
+        res.child = child;
         res.guard = guard;
         (res, input)
     }
@@ -213,29 +266,24 @@ impl<P: PCFG> PCFG for IfPCFG<P> {
     fn uniform() -> Self {
         Self {
             guard: BExprPCFG::uniform(),
-            then: P::uniform(),
-            otherwise: P::uniform(),
+            child: P::uniform(),
         }
     }
 }
 
 /// PCFG for a for loop
-#[derive(Debug, Clone, Default)]
-pub struct LoopPCFG<P: PCFG> {
-    init: ExprPCFG,
-    limit: ExprPCFG,
-    step: ExprPCFG,
-    body: P,
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoopPCFG {
+    pub init: AExprPCFG,
+    pub limit: AExprPCFG,
 }
 
-impl<P: PCFG> PCFG for LoopPCFG<P> {
-    const COUNT: usize = ExprPCFG::COUNT * 3 + P::COUNT;
+impl PCFG for LoopPCFG {
+    const COUNT: usize = ExprPCFG::COUNT * 3;
 
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out = self.init.serialize(out);
         out = self.limit.serialize(out);
-        out = self.step.serialize(out);
-        out = self.body.serialize(out);
         out
     }
 
@@ -244,12 +292,8 @@ impl<P: PCFG> PCFG for LoopPCFG<P> {
         Self: Sized,
     {
         let mut res = Self::default();
-        let (body, input) = P::deserialize(input);
-        let (step, input) = ExprPCFG::deserialize(input);
-        let (limit, input) = ExprPCFG::deserialize(input);
-        let (init, input) = ExprPCFG::deserialize(input);
-        res.body = body;
-        res.step = step;
+        let (limit, input) = AExprPCFG::deserialize(input);
+        let (init, input) = AExprPCFG::deserialize(input);
         res.limit = limit;
         res.init = init;
         (res, input)
@@ -257,37 +301,27 @@ impl<P: PCFG> PCFG for LoopPCFG<P> {
 
     fn uniform() -> Self {
         Self {
-            init: ExprPCFG::uniform(),
-            limit: ExprPCFG::uniform(),
-            step: ExprPCFG::uniform(),
-            body: P::uniform(),
+            init: AExprPCFG::uniform(),
+            limit: AExprPCFG::uniform(),
         }
     }
 }
 
-/// PCFG for a nested statement
-#[derive(Debug, Clone, Default)]
-pub struct NestedStmtPCFG {
-    base: [f64; Statement::COUNT],
-    assign: ExprPCFG,
-    if_stmt: IfPCFG<[f64; Statement::COUNT]>,
-    for_stmt: LoopPCFG<[f64; Statement::COUNT]>,
-    ret: ExprPCFG,
-    pcall: ExprPCFG,
-    print: ExprPCFG,
-    /// probability of there being a following statement
-    seq: f64,
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BlockPCFG<T: PCFG> {
+    pub choice: [f64; StmtBlock::COUNT],
+    pub if_pcfg: IfPCFG<T>,
+    pub loop_pcfg: LoopPCFG,
+    pub stmt: T,
+    pub seq: f64,
 }
 
-impl PCFG for NestedStmtPCFG {
-    fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
-        out.push(PSpace(self.base.to_vec()));
-        out = self.assign.serialize(out);
-        out = self.if_stmt.serialize(out);
-        out = self.for_stmt.serialize(out);
-        out = self.ret.serialize(out);
-        out = self.pcall.serialize(out);
-        out = self.print.serialize(out);
+impl<T: PCFG> PCFG for BlockPCFG<T> {
+    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
+        let mut out = <[f64; StmtBlock::COUNT]>::serialize(&self.choice, out);
+        out = self.if_pcfg.serialize(out);
+        out = self.loop_pcfg.serialize(out);
+        out = self.stmt.serialize(out);
         out.push(PSpace(vec![self.seq]));
         out
     }
@@ -296,73 +330,53 @@ impl PCFG for NestedStmtPCFG {
     where
         Self: Sized,
     {
-        let o_len = input.len();
-        assert!(input.len() >= Self::COUNT);
-        let mut res = Self {
-            seq: pop_singleton(&mut input),
-            ..Default::default()
-        };
-        let (print, input) = ExprPCFG::deserialize(input);
-        let (pcall, input) = ExprPCFG::deserialize(input);
-        let (retn, input) = ExprPCFG::deserialize(input);
-        let (for_stmt, input) = LoopPCFG::<[f64; Statement::COUNT]>::deserialize(input);
-        let (if_stmt, input) = IfPCFG::<[f64; Statement::COUNT]>::deserialize(input);
-        let (assign, input) = ExprPCFG::deserialize(input);
-        let (base, input) = <[f64; Statement::COUNT]>::deserialize(input);
-        res.print = print;
-        res.pcall = pcall;
-        res.ret = retn;
-        res.for_stmt = for_stmt;
-        res.if_stmt = if_stmt;
-        res.assign = assign;
-        res.base = base;
-        assert_eq!(input.len(), o_len - Self::COUNT);
+        let mut res = Self::default();
+        let seq = pop_singleton(&mut input);
+        let (stmt_pcfg, input) = T::deserialize(input);
+        let (loop_pcfg, input) = LoopPCFG::deserialize(input);
+        let (if_pcfg, input) = IfPCFG::deserialize(input);
+        let (choice, input) = <[f64; StmtBlock::COUNT]>::deserialize(input);
+        res.seq = seq;
+        res.stmt = stmt_pcfg;
+        res.loop_pcfg = loop_pcfg;
+        res.if_pcfg = if_pcfg;
+        res.choice = choice;
         (res, input)
     }
 
-    fn uniform() -> Self {
+    fn uniform() -> Self
+    where
+        Self: Sized,
+    {
         Self {
-            base: <[f64; Statement::COUNT]>::uniform(),
-            assign: ExprPCFG::uniform(),
-            if_stmt: IfPCFG::<[f64; Statement::COUNT]>::uniform(),
-            for_stmt: LoopPCFG::<[f64; Statement::COUNT]>::uniform(),
-            ret: ExprPCFG::uniform(),
-            pcall: ExprPCFG::uniform(),
-            print: ExprPCFG::uniform(),
+            choice: <[f64; StmtBlock::COUNT]>::uniform(),
+            if_pcfg: IfPCFG::uniform(),
+            stmt: T::uniform(),
+            loop_pcfg: LoopPCFG::uniform(),
             seq: 0.5_f64.ln(),
         }
     }
 
-    const COUNT: usize = Statement::COUNT
-        + ExprPCFG::COUNT * 5
-        + IfPCFG::<[f64; Statement::COUNT]>::COUNT
-        + LoopPCFG::<[f64; Statement::COUNT]>::COUNT;
+    const COUNT: usize =
+        StmtBlock::COUNT + IfPCFG::<[f64; StmtBlock::COUNT]>::COUNT + LoopPCFG::COUNT + 1;
 }
 
-/// A PCFG for a top level statement
-#[derive(Debug, Clone, Default)]
-pub struct StmtPCFG {
-    base: [f64; Statement::COUNT],
-    assign: ExprPCFG,
-    if_stmt: IfPCFG<NestedStmtPCFG>,
-    for_stmt: LoopPCFG<NestedStmtPCFG>,
-    ret: ExprPCFG,
-    pcall: ExprPCFG,
-    print: ExprPCFG,
-    /// probability of a following statement
-    seq: f64,
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TopPCFG {
+    pub block: BlockPCFG<StmtPCFG>,
+    pub loop_block: BlockPCFG<LoopStmtPCFG>,
+    pub expr: ExprPCFG,
+    pub fn_pcfg: FnPCFG,
+    pub catch_type: [f64; 3],
 }
 
-impl PCFG for StmtPCFG {
-    fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
-        out.push(PSpace(self.base.to_vec()));
-        out = self.assign.serialize(out);
-        out = self.if_stmt.serialize(out);
-        out = self.for_stmt.serialize(out);
-        out = self.ret.serialize(out);
-        out = self.pcall.serialize(out);
-        out = self.print.serialize(out);
-        out.push(PSpace(vec![self.seq]));
+impl PCFG for TopPCFG {
+    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
+        let out = self.block.serialize(out);
+        let out = self.loop_block.serialize(out);
+        let out = self.expr.serialize(out);
+        let mut out = self.fn_pcfg.serialize(out);
+        out.push(PSpace(self.catch_type.to_vec()));
         out
     }
 
@@ -370,57 +384,51 @@ impl PCFG for StmtPCFG {
     where
         Self: Sized,
     {
-        assert!(input.len() >= Self::COUNT);
-        let o_len = input.len();
-        let mut res = Self {
-            seq: pop_singleton(&mut input),
-            ..Default::default()
-        };
-        let (print, input) = ExprPCFG::deserialize(input);
-        let (pcall, input) = ExprPCFG::deserialize(input);
-        let (retn, input) = ExprPCFG::deserialize(input);
-        let (for_stmt, input) = LoopPCFG::<NestedStmtPCFG>::deserialize(input);
-        let (if_stmt, input) = IfPCFG::<NestedStmtPCFG>::deserialize(input);
-        let (assign, input) = ExprPCFG::deserialize(input);
-        let (base, input) = <[f64; Statement::COUNT]>::deserialize(input);
-        assert_eq!(input.len(), o_len - Self::COUNT);
-        res.print = print;
-        res.pcall = pcall;
-        res.ret = retn;
-        res.for_stmt = for_stmt;
-        res.if_stmt = if_stmt;
-        res.assign = assign;
-        res.base = base;
-        (res, input)
+        let catch_type = input.pop().unwrap().0.try_into().unwrap();
+        let (fn_pcfg, input) = FnPCFG::deserialize(input);
+        let (expr, input) = ExprPCFG::deserialize(input);
+        let (loop_block, input) = BlockPCFG::<LoopStmtPCFG>::deserialize(input);
+        let (block, input) = BlockPCFG::<StmtPCFG>::deserialize(input);
+        (
+            Self {
+                block,
+                loop_block,
+                expr,
+                fn_pcfg,
+                catch_type,
+            },
+            input,
+        )
     }
 
-    fn uniform() -> Self {
+    fn uniform() -> Self
+    where
+        Self: Sized,
+    {
         Self {
-            base: <[f64; Statement::COUNT]>::uniform(),
-            assign: ExprPCFG::uniform(),
-            if_stmt: IfPCFG::<NestedStmtPCFG>::uniform(),
-            for_stmt: LoopPCFG::<NestedStmtPCFG>::uniform(),
-            ret: ExprPCFG::uniform(),
-            pcall: ExprPCFG::uniform(),
-            print: ExprPCFG::uniform(),
-            seq: 0.5_f64.ln(),
+            catch_type: [(1.0 / 3.0_f64).ln(); 3],
+            fn_pcfg: FnPCFG::uniform(),
+            block: BlockPCFG::<StmtPCFG>::uniform(),
+            loop_block: BlockPCFG::<LoopStmtPCFG>::uniform(),
+            expr: ExprPCFG::uniform(),
         }
     }
 
-    const COUNT: usize = Statement::COUNT
-        + ExprPCFG::COUNT * 5
-        + IfPCFG::<NestedStmtPCFG>::COUNT
-        + LoopPCFG::<NestedStmtPCFG>::COUNT;
+    const COUNT: usize = BlockPCFG::<StmtPCFG>::COUNT
+        + BlockPCFG::<LoopStmtPCFG>::COUNT
+        + ExprPCFG::COUNT
+        + FnPCFG::COUNT
+        + 3;
 }
 
 /// Probability of a function call
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct FnPCFG {
     /// probability of int, bool, void
-    ret_type: [f64; 3],
+    pub ret_type: [f64; 3],
     /// probability of int, bool, void
     /// The end of input argument list is represented with void
-    arg_type: [f64; 3],
+    pub arg_type: [f64; 3],
 }
 
 impl PCFG for FnPCFG {
@@ -434,7 +442,6 @@ impl PCFG for FnPCFG {
     where
         Self: Sized,
     {
-        assert!(input.len() >= Self::COUNT);
         let res = Self {
             arg_type: input.pop().unwrap().0.try_into().unwrap(),
             ret_type: input.pop().unwrap().0.try_into().unwrap(),
@@ -454,28 +461,19 @@ impl PCFG for FnPCFG {
     const COUNT: usize = 6;
 }
 
-impl PCFG for [f64; Statement::COUNT] {
-    fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
-        out.push(PSpace(self.to_vec()));
-        out
-    }
+support::array_pcfg!([f64; Statement::COUNT]);
+support::array_pcfg!([f64; LoopStatement::COUNT]);
+support::array_pcfg!([f64; StmtBlock::COUNT]);
 
-    fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>)
-    where
-        Self: Sized,
-    {
-        let res = input.pop().unwrap().0.try_into().unwrap();
-        (res, input)
+#[cfg(test)]
+mod serialization_test {
+    #[test]
+    fn test() {
+        use super::*;
+        let pcfg = TopPCFG::uniform();
+        let mut out = Vec::new();
+        out = pcfg.serialize(out);
+        let (pcfg2, _) = TopPCFG::deserialize(out);
+        assert_eq!(pcfg, pcfg2);
     }
-
-    fn uniform() -> Self {
-        #[allow(clippy::cast_precision_loss)]
-        std::iter::repeat((1.0 / Statement::COUNT as f64).ln())
-            .take(Statement::COUNT)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    const COUNT: usize = Statement::COUNT;
 }
