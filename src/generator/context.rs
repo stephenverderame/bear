@@ -118,8 +118,11 @@ impl<'a> Context<'a> {
             .collect()
     }
 
-    /// Gets the context of the nearest loop
+    /// Gets the context right before a loop in the stack frame
+    /// This may be the context before the nearest loop, or a parent loop
+    #[deprecated(note = "Fix this")]
     pub fn loop_inv(&self) -> Option<&Context<'a>> {
+        // TODO: fix this
         if self.cur.is_loop {
             Some(self)
         } else {
@@ -133,14 +136,6 @@ impl<'a> Context<'a> {
             cur: StackFrame::new_child(&self.cur),
             parent: Some(self),
         }
-    }
-
-    /// Gets arithmetic expression info for the given expression
-    pub(super) fn lookup_aexpr(&self, expr: &AExpr) -> Option<&ExprInfo> {
-        self.cur
-            .available_aexprs
-            .get(expr)
-            .or_else(|| self.parent.and_then(|p| p.lookup_aexpr(expr)))
     }
 
     pub(super) fn lookup_var(&self, var: &str) -> Option<ExprInfo> {
@@ -165,7 +160,15 @@ impl<'a> Context<'a> {
         self.cur.available_aexprs.insert(expr, info);
     }
 
-    pub(super) fn new_var(&mut self, name: String, interval: Interval) {
-        self.cur.avars.insert(name, interval);
+    pub(super) fn new_bexpr(&mut self, expr: BExpr, vars: Vec<String>) {
+        self.cur.available_bexprs.insert(expr, vars);
+    }
+
+    pub(super) fn new_avar(&mut self, name: &str, interval: Interval) {
+        self.cur.avars.insert(name.to_string(), interval);
+    }
+
+    pub(super) fn new_bvar(&mut self, name: &str) {
+        self.cur.bvars.insert(name.to_string());
     }
 }

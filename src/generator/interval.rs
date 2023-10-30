@@ -106,6 +106,7 @@ impl std::ops::Div<Self> for Interval {
 #[cfg(test)]
 mod test {
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn test_interval() {
         let a = 0;
         let b = 100;

@@ -89,6 +89,7 @@ impl PCFG for AExprPCFG {
 pub struct BExprPCFG {
     pub choice: [f64; BExpr::COUNT],
     pub boolean: f64,
+    pub reuse: f64,
 }
 
 impl PCFG for BExprPCFG {
@@ -97,6 +98,7 @@ impl PCFG for BExprPCFG {
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out.push(PSpace(self.choice.to_vec()));
         out.push(PSpace(vec![self.boolean]));
+        out.push(PSpace(vec![self.reuse]));
         out
     }
 
@@ -105,6 +107,7 @@ impl PCFG for BExprPCFG {
         Self: Sized,
     {
         let res = Self {
+            reuse: pop_singleton(&mut input),
             boolean: pop_singleton(&mut input),
             choice: input
                 .pop()
@@ -122,6 +125,7 @@ impl PCFG for BExprPCFG {
     fn uniform() -> Self {
         let mut res = Self {
             boolean: 0.5_f64.ln(),
+            reuse: 0.5_f64.ln(),
             ..Default::default()
         };
         #[allow(clippy::cast_precision_loss)]
@@ -357,8 +361,10 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
         }
     }
 
-    const COUNT: usize =
-        StmtBlock::COUNT + IfPCFG::<[f64; StmtBlock::COUNT]>::COUNT + LoopPCFG::COUNT + 1;
+    const COUNT: usize = StmtBlock::COUNT
+        + IfPCFG::<[f64; StmtBlock::COUNT]>::COUNT
+        + LoopPCFG::COUNT
+        + 1;
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

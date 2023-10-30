@@ -43,9 +43,9 @@ pub enum BExpr {
 impl std::fmt::Display for BExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::And(left, right) => write!(f, "(&& {left} {right})"),
+            Self::And(left, right) => write!(f, "(and {left} {right})"),
             Self::Not(expr) => write!(f, "(not {expr})"),
-            Self::Or(left, right) => write!(f, "(|| {left} {right})"),
+            Self::Or(left, right) => write!(f, "(or {left} {right})"),
             Self::Lt(left, right) => write!(f, "(< {left} {right})"),
             Self::Gt(left, right) => write!(f, "(> {left} {right})"),
             Self::Le(left, right) => write!(f, "(<= {left} {right})"),
@@ -64,7 +64,9 @@ impl std::fmt::Display for BExpr {
                         .join(" ")
                 )
             }
-            Self::Redundant(expr) | Self::LoopInvariant(expr) => write!(f, "{expr}"),
+            Self::Redundant(expr) | Self::LoopInvariant(expr) => {
+                write!(f, "{expr}")
+            }
         }
     }
 }
@@ -107,7 +109,9 @@ impl std::fmt::Display for AExpr {
                         .join(" ")
                 )
             }
-            Self::Redundant(expr) | Self::LoopInvariant(expr) => write!(f, "{expr}"),
+            Self::Redundant(expr) | Self::LoopInvariant(expr) => {
+                write!(f, "{expr}")
+            }
             Self::Derived {
                 basic,
                 factor,
@@ -141,14 +145,6 @@ pub enum LoopStatement {
 }
 
 impl LoopStatement {
-    pub fn index(&self) -> usize {
-        match self {
-            Self::Stmt(s) => s.index(),
-            Self::Break(_) => Statement::COUNT,
-            Self::Continue(_) => Statement::COUNT + 1,
-        }
-    }
-
     pub const COUNT: usize = Statement::COUNT + 2;
 }
 

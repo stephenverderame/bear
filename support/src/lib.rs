@@ -22,22 +22,15 @@ pub fn indexable_derive(input: TokenStream) -> TokenStream {
         }
         generic_str += ">";
     }
-    res += &format!("{generic_str} {enum_name}{generic_str}");
+    res += &format!("{generic_str} {enum_name}{generic_str} {{");
 
-    res += r#"{
-        pub fn index(&self) -> usize {
-            match self {
-    "#;
     for (index, v) in vars.iter().enumerate() {
         res += &format!(
-            "{enum_name}::{variant} {{..}} => {index},",
-            variant = v.ident,
+            "pub const {variant}_IDX: usize = {index};\n",
+            variant = v.ident.to_string().to_ascii_uppercase(),
         );
     }
-    res += r#"
-            }
-        }
-    }"#;
+    res += r#"}"#;
     res.parse().unwrap()
 }
 
