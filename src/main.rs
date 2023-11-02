@@ -12,7 +12,7 @@ fn main() {
     println!("{}", pcfg::TopPCFG::COUNT);
     let pcfg = pcfg::TopPCFG::uniform();
     for _ in 0..20 {
-        println!("{}", generator::gen_program(&pcfg));
+        println!("{}", generator::display(&generator::gen_program(&pcfg)));
         println!();
         println!();
     }

@@ -57,6 +57,15 @@ impl Interval {
     pub const fn upper_bound(&self) -> i64 {
         self.max
     }
+
+    /// Returns the union of two intervals (the smallest interval that contains
+    /// both intervals)
+    pub fn union(&self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
 }
 
 impl std::ops::Add<Self> for Interval {
@@ -105,6 +114,7 @@ impl std::ops::Div<Self> for Interval {
 
 #[cfg(test)]
 mod test {
+    use super::Interval;
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn test_interval() {
@@ -112,30 +122,27 @@ mod test {
         let b = 100;
         let c = -20;
         let d = 30;
-        let i = super::Interval::new(a, b);
-        let j = super::Interval::new(c, d);
-        assert_eq!(i + j, super::Interval::new(a + c, b + d));
-        assert_eq!(i - j, super::Interval::new(a - d, b - c));
-        assert_eq!(i * j, super::Interval::new(a * c, b * d));
-        assert_eq!(i / j, super::Interval::new(a / d, b / c));
+        let i = Interval::new(a, b);
+        let j = Interval::new(c, d);
+        assert_eq!(i + j, Interval::new(a + c, b + d));
+        assert_eq!(i - j, Interval::new(a - d, b - c));
+        assert_eq!(i * j, Interval::new(a * c, b * d));
+        assert_eq!(i / j, Interval::new(a / d, b / c));
     }
 
     #[test]
     fn test_div() {
-        let a_intval = super::Interval::new(0, 100);
-        let b_intval = super::Interval::new(0, 100);
-        let c_intval = super::Interval::from_const(-3);
-        assert_eq!(
-            (a_intval + b_intval) / c_intval,
-            super::Interval::new(-66, 0)
-        );
+        let a_intval = Interval::new(0, 100);
+        let b_intval = Interval::new(0, 100);
+        let c_intval = Interval::from_const(-3);
+        assert_eq!((a_intval + b_intval) / c_intval, Interval::new(-66, 0));
         // (+ (* (/ 99 (- 42 -8)) (/ (/ c -27) -83)) 4115739418498339)
-        let a_intval = super::Interval::new(0, 100);
-        let c = a_intval / super::Interval::from_const(-27); // (-3, 0)
-        let c = c / super::Interval::from_const(-83); // (0, 0)
-        let b = super::Interval::from_const(99) // (0, 0)
-            / (super::Interval::from_const(42) - super::Interval::from_const(-8));
+        let a_intval = Interval::new(0, 100);
+        let c = a_intval / Interval::from_const(-27); // (-3, 0)
+        let c = c / Interval::from_const(-83); // (0, 0)
+        let b = Interval::from_const(99) // (0, 0)
+            / (Interval::from_const(42) - Interval::from_const(-8));
         let b = b * c;
-        assert_eq!(b, super::Interval::new(0, 0));
+        assert_eq!(b, Interval::new(0, 0));
     }
 }

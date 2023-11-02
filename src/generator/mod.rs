@@ -5,9 +5,9 @@ mod interval;
 use interval::Interval;
 mod context;
 
-use crate::bare_c::{BExpr, Expr};
+use crate::bare_c::{BExpr, Block, Expr, Statement};
 use crate::generator::context::FuncList;
-use crate::pcfg::ExprPCFG;
+use crate::pcfg::{ExprPCFG, StmtPCFG};
 /// Overflow is not an error in BRIL, so we just don't worry about it.
 /// Furthermore, we use random probing for a few reasons:
 /// 1. We don't want small programs
@@ -21,10 +21,14 @@ use crate::{
 
 use self::context::Context;
 
+const EXPR_FUEL: usize = 10;
+const STMT_FUEL: usize = 4;
+
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 enum Type {
     Int,
     Bool,
+    Void,
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -62,6 +66,17 @@ impl ExprInfo {
     /// Gets the combined list of used variables in both expressions
     pub fn union(self, rhs: Self) -> Vec<String> {
         self.vars.into_iter().chain(rhs.vars).collect()
+    }
+
+    /// Performs the meet of two `ExprInfo`s
+    /// # Panics
+    /// Panics if the two `ExprInfo`s do not use the same variables
+    pub fn meet(self, rhs: &Self) -> Self {
+        assert_eq!(self.vars, rhs.vars);
+        Self {
+            vars: self.vars,
+            interval: self.interval.union(rhs.interval),
+        }
     }
 }
 
@@ -170,6 +185,8 @@ fn gen_div(
 struct Distribs {
     aexpr_idx: WeightedIndex<f64>,
     bexpr_idx: WeightedIndex<f64>,
+    stmt_idx: WeightedIndex<f64>,
+    block_idx: WeightedIndex<f64>,
     uniform: Uniform<f64>,
 }
 
@@ -183,6 +200,14 @@ impl Distribs {
             aexpr_idx: index,
             bexpr_idx: WeightedIndex::new(
                 pcfg.expr.b_expr.choice.iter().map(|x| x.exp()),
+            )
+            .unwrap(),
+            stmt_idx: WeightedIndex::new(
+                pcfg.block.stmt.choice.iter().map(|x| x.exp()),
+            )
+            .unwrap(),
+            block_idx: WeightedIndex::new(
+                pcfg.block.choice.iter().map(|x| x.exp()),
             )
             .unwrap(),
             uniform,
@@ -261,6 +286,9 @@ fn gen_abop(
 /// * `ctx` - The context to use
 /// * `distrib` - The distribution to use
 /// * `fuel` - The amount of fuel to use (maximum tree depth)
+/// # Returns
+/// Returns the generated expression and information regarding it,
+/// such as the range of values it can take and the variables it uses
 fn gen_aexpr(
     pcfg: &AExprPCFG,
     ctx: &mut Context,
@@ -324,6 +352,9 @@ fn gen_bool_bexpr(
     fuel: usize,
     idx: usize,
 ) -> (BExpr, Vec<String>) {
+    if fuel == 0 {
+        return gen_bexpr(pcfg, ctx, distrib, funcs, fuel);
+    }
     let (lhs, lhs_info) = gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1);
     let (rhs, rhs_info) = gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1);
     match idx {
@@ -352,6 +383,9 @@ fn gen_cmp_bexpr(
     fuel: usize,
     idx: usize,
 ) -> (BExpr, Vec<String>) {
+    if fuel == 0 {
+        return gen_bexpr(pcfg, ctx, distrib, funcs, fuel);
+    }
     let (lhs, lhs_info) =
         gen_aexpr(&pcfg.a_expr, ctx, distrib, funcs, fuel - 1);
     let (rhs, rhs_info) =
@@ -381,6 +415,14 @@ fn gen_cmp_bexpr(
     }
 }
 
+/// Generates an expression which results in a boolean
+/// # Arguments
+/// * `pcfg` - The PCFG to use
+/// * `ctx` - The context to use
+/// * `distrib` - The distribution to use
+/// * `fuel` - The amount of fuel to use (maximum tree depth)
+/// # Returns
+/// * The generated expression and a set of variables used in the expression
 fn gen_bexpr(
     pcfg: &ExprPCFG,
     ctx: &mut Context,
@@ -435,7 +477,198 @@ fn gen_bexpr(
     (expr, vars)
 }
 
-pub fn gen_program(pcfg: &TopPCFG) -> Expr {
+/// Generates an assignment statement, updating the context accordingly
+/// for dataflow updates
+fn gen_assign(
+    pcfg: &StmtPCFG,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+) -> Statement {
+    let typ =
+        if distribs.uniform.sample(&mut thread_rng()) < pcfg.var_type.exp() {
+            Type::Int
+        } else {
+            Type::Bool
+        };
+    let var = if distribs.uniform.sample(&mut thread_rng()) < pcfg.new_var.exp()
+    {
+        if typ == Type::Int {
+            get_rand_avar(ctx).unwrap()
+        } else {
+            get_rand_bvar(ctx).unwrap()
+        }
+    } else {
+        ctx.new_var()
+    };
+    ctx.kill_available_exprs(&var, typ);
+    let expr = if typ == Type::Int {
+        let (expr, expr_info) =
+            gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
+        ctx.new_avar(&var, expr_info.interval);
+        Expr::AExpr(expr)
+    } else {
+        let (expr, _) = gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+        ctx.new_bvar(&var);
+        Expr::BExpr(expr)
+    };
+    Statement::Assign {
+        dest: var,
+        src: expr,
+    }
+}
+
+fn gen_throw(
+    pcfg: &StmtPCFG,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+) -> Statement {
+    if let Some((idx, typ)) = ctx.rand_catch(&distribs.uniform) {
+        match typ {
+            Type::Int => {
+                let (expr, _) = gen_aexpr(
+                    &expr_pcfg.a_expr,
+                    ctx,
+                    distribs,
+                    funcs,
+                    EXPR_FUEL,
+                );
+                // TODO: interval info
+                Statement::Throw(idx, Some(Expr::AExpr(expr)))
+            }
+            Type::Bool => {
+                let (expr, _) =
+                    gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+                Statement::Throw(idx, Some(Expr::BExpr(expr)))
+            }
+            Type::Void => Statement::Throw(idx, None),
+        }
+    } else {
+        gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs)
+    }
+}
+
+fn gen_stmt(
+    pcfg: &StmtPCFG,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+) -> Statement {
+    let idx = distribs.stmt_idx.sample(&mut rand::thread_rng());
+    match idx {
+        Statement::ASSIGN_IDX => {
+            gen_assign(pcfg, expr_pcfg, ctx, distribs, funcs)
+        }
+        Statement::RET_IDX if ctx.ret_type() == Type::Int => {
+            let (expr, info) =
+                gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
+            ctx.union_ret_rng(info.interval);
+            Statement::Ret(Some(Expr::AExpr(expr)))
+        }
+        Statement::RET_IDX if ctx.ret_type() == Type::Bool => {
+            let (expr, _) =
+                gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+            Statement::Ret(Some(Expr::BExpr(expr)))
+        }
+        Statement::RET_IDX => Statement::Ret(None),
+        Statement::THROW_IDX => {
+            gen_throw(pcfg, expr_pcfg, ctx, distribs, funcs)
+        }
+        Statement::PRINT_IDX => Statement::Print(
+            get_rand_avar(ctx)
+                .map(|x| vec![Expr::AExpr(AExpr::Id(x))])
+                .unwrap_or_default(),
+        ),
+        // TODO
+        Statement::PCALL_IDX => gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs),
+        _ => unreachable!(),
+    }
+}
+
+/// Generates an if statement
+fn gen_if(
+    pcfg: &TopPCFG,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> Block<Statement> {
+    let (cond, _) = gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+    let mut true_frame = ctx.child_frame();
+    let mut false_frame = ctx.child_frame();
+    let then_block =
+        gen_blocks(pcfg, expr_pcfg, &mut true_frame, distribs, funcs, fuel - 1);
+    let else_block = gen_blocks(
+        pcfg,
+        expr_pcfg,
+        &mut false_frame,
+        distribs,
+        funcs,
+        fuel - 1,
+    );
+    let sf = Context::meet(true_frame, &false_frame);
+    ctx.update(sf);
+    Block::If {
+        guard: cond,
+        then: then_block,
+        otherwise: else_block,
+    }
+}
+
+/// Generates a sequence of blocks
+fn gen_blocks(
+    pcfg: &TopPCFG,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> Vec<Block<Statement>> {
+    let mut res = vec![];
+    while distribs.uniform.sample(&mut thread_rng()) < pcfg.block.seq.exp()
+        && fuel > 0
+    {
+        res.push(gen_block(pcfg, expr_pcfg, ctx, distribs, funcs, fuel));
+    }
+    res
+}
+
+fn gen_block(
+    pcfg: &TopPCFG,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> Block<Statement> {
+    let idx = distribs.block_idx.sample(&mut rand::thread_rng());
+    match idx {
+        Block::<Statement>::DEAD_IDX => Block::Dead(gen_blocks(
+            pcfg,
+            expr_pcfg,
+            &mut ctx.child_frame(),
+            distribs,
+            funcs,
+            fuel - 1,
+        )),
+        Block::<Statement>::STMT_IDX => {
+            let stmt =
+                gen_stmt(&pcfg.block.stmt, expr_pcfg, ctx, distribs, funcs);
+            Block::Stmt(stmt)
+        }
+        Block::<Statement>::IF_IDX => {
+            gen_if(pcfg, expr_pcfg, ctx, distribs, funcs, fuel)
+        }
+        _ => gen_block(pcfg, expr_pcfg, ctx, distribs, funcs, fuel),
+    }
+}
+
+pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
     let mut funcs = FuncList::new();
     let mut ctx = Context::make_root();
     ctx.new_avar("a", Interval::new(0, 100));
@@ -443,24 +676,20 @@ pub fn gen_program(pcfg: &TopPCFG) -> Expr {
     ctx.new_avar("c", Interval::new(0, 100));
     ctx.new_bvar("d");
     ctx.new_bvar("e");
-    if thread_rng().sample(rand::distributions::Bernoulli::new(0.5).unwrap()) {
-        let (prog, info) = gen_aexpr(
-            &pcfg.expr.a_expr,
-            &mut ctx,
-            &mut Distribs::new(pcfg),
-            &mut funcs,
-            10,
-        );
-        println!("{}: ", info.interval);
-        Expr::AExpr(prog)
-    } else {
-        let (prog, _) = gen_bexpr(
-            &pcfg.expr,
-            &mut ctx,
-            &mut Distribs::new(pcfg),
-            &mut funcs,
-            11,
-        );
-        Expr::BExpr(prog)
+    gen_blocks(
+        pcfg,
+        &pcfg.expr,
+        &mut ctx,
+        &mut Distribs::new(pcfg),
+        &mut funcs,
+        STMT_FUEL,
+    )
+}
+
+pub fn display(program: &[Block<Statement>]) -> String {
+    let mut res = String::new();
+    for block in program {
+        res += &format!("{}", block);
     }
+    res
 }

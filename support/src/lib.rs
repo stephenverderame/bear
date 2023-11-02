@@ -11,18 +11,24 @@ pub fn indexable_derive(input: TokenStream) -> TokenStream {
     let vars = ast.variants;
     let mut res = "impl".to_string();
     let letters = ["T", "U", "V", "W", "X", "Y", "Z"];
-    let mut generic_str = "".to_string();
+    let mut generic_str = String::new();
+    let mut generic_str2 = String::new();
     if !ast.generics.params.is_empty() {
         generic_str += "<";
-        for i in ast.generics.params.iter().enumerate().map(|(i, _)| i) {
+        generic_str2 += "<";
+        for (i, p) in ast.generics.params.iter().enumerate() {
             if i != 0 {
                 generic_str += ", ";
+                generic_str2 += ", ";
             }
+            // A terrible hack for now
             generic_str += letters[i];
+            generic_str2 += &format!("{}: Pretty", letters[i]);
         }
         generic_str += ">";
+        generic_str2 += ">";
     }
-    res += &format!("{generic_str} {enum_name}{generic_str} {{");
+    res += &format!("{generic_str2} {enum_name}{generic_str} {{");
 
     for (index, v) in vars.iter().enumerate() {
         res += &format!(

@@ -184,19 +184,33 @@ impl PCFG for ExprPCFG {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StmtPCFG {
     pub choice: [f64; Statement::COUNT],
+    pub new_var: f64,
+    pub var_type: f64,
 }
 
 impl PCFG for StmtPCFG {
-    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
-        <[f64; Statement::COUNT]>::serialize(&self.choice, out)
+    fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
+        let mut out = <[f64; Statement::COUNT]>::serialize(&self.choice, out);
+        out.push(PSpace(vec![self.new_var]));
+        out.push(PSpace(vec![self.var_type]));
+        out
     }
 
-    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>)
     where
         Self: Sized,
     {
+        let var_type = pop_singleton(&mut input);
+        let new_var = pop_singleton(&mut input);
         let (choice, input) = <[f64; Statement::COUNT]>::deserialize(input);
-        (Self { choice }, input)
+        (
+            Self {
+                choice,
+                new_var,
+                var_type,
+            },
+            input,
+        )
     }
 
     fn uniform() -> Self
@@ -205,6 +219,8 @@ impl PCFG for StmtPCFG {
     {
         Self {
             choice: <[f64; Statement::COUNT]>::uniform(),
+            new_var: 0.5_f64.ln(),
+            var_type: 0.5_f64.ln(),
         }
     }
 
