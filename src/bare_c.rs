@@ -1,5 +1,4 @@
 use crate::strum::EnumCount;
-use pretty::RcDoc;
 use strum_macros::EnumCount as CountMacro;
 use support::Indexable;
 
@@ -13,25 +12,11 @@ pub enum Expr {
     BExpr(BExpr),
 }
 
-impl std::fmt::Display for Expr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AExpr(a) => write!(f, "{a}"),
-            Self::BExpr(b) => write!(f, "{b}"),
-        }
-    }
-}
-
-/// Something that can be pretty printed
-pub trait Pretty {
-    fn to_doc(&self) -> RcDoc<()>;
-}
-
 impl Pretty for Expr {
-    fn to_doc(&self) -> RcDoc<()> {
+    fn pretty(&self, indent: isize) -> String {
         match self {
-            Self::AExpr(a) => a.to_doc(),
-            Self::BExpr(b) => b.to_doc(),
+            Self::AExpr(expr) => expr.pretty(indent),
+            Self::BExpr(expr) => expr.pretty(indent),
         }
     }
 }
@@ -55,93 +40,62 @@ pub enum BExpr {
     LoopInvariant(Box<BExpr>),
 }
 
-impl std::fmt::Display for BExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut v = Vec::new();
-        self.to_doc()
-            .render(80, &mut v)
-            .map_err(|_| std::fmt::Error)?;
-        write!(f, "{}", String::from_utf8_lossy(&v))
+impl Pretty for BExpr {
+    fn pretty(&self, indent: isize) -> String {
+        match self {
+            Self::And(lhs, rhs) => {
+                format!("(&& {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Not(expr) => {
+                format!("(! {})", expr.pretty(indent))
+            }
+            Self::Or(lhs, rhs) => {
+                format!("(|| {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Lt(lhs, rhs) => {
+                format!("(< {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Gt(lhs, rhs) => {
+                format!("(> {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Le(lhs, rhs) => {
+                format!("(<= {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Ge(lhs, rhs) => {
+                format!("(>= {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Eqb(lhs, rhs) => {
+                format!("(== {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Eqa(lhs, rhs) => {
+                format!("(== {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Id(id) => id.clone(),
+            Self::Bool(b) => b.to_string(),
+            Self::FCall(name, args) => {
+                let mut res = format!("({name}");
+                for arg in args {
+                    res += &format!(" {}", arg.pretty(indent));
+                }
+                res += ")";
+                res
+            }
+            Self::Redundant(expr) | Self::LoopInvariant(expr) => {
+                expr.pretty(indent)
+            }
+        }
     }
 }
 
-impl Pretty for BExpr {
-    #[allow(clippy::too_many_lines)]
-    fn to_doc(&self) -> RcDoc<()> {
-        match self {
-            Self::Id(x) => RcDoc::as_string(x),
-            Self::Bool(b) => RcDoc::as_string(b),
-            Self::And(left, right) => RcDoc::text("(")
-                .append("&&")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Not(expr) => RcDoc::text("(")
-                .append("!")
-                .append(RcDoc::softline())
-                .append(expr.to_doc())
-                .append(")"),
-            Self::Or(left, right) => RcDoc::text("(")
-                .append("||")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Lt(left, right) => RcDoc::text("(")
-                .append("<")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Gt(left, right) => RcDoc::text("(")
-                .append(">")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Le(left, right) => RcDoc::text("(")
-                .append("<=")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Ge(left, right) => RcDoc::text("(")
-                .append(">=")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Eqb(left, right) => RcDoc::text("(")
-                .append("=?")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Eqa(left, right) => RcDoc::text("(")
-                .append("=")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::FCall(name, args) => RcDoc::text("(")
-                .append(name)
-                .append(RcDoc::softline())
-                .append(RcDoc::intersperse(
-                    args.iter().map(Pretty::to_doc),
-                    RcDoc::space(),
-                ))
-                .append(")"),
-            Self::Redundant(expr) | Self::LoopInvariant(expr) => expr.to_doc(),
+pub trait Pretty {
+    fn pretty(&self, indent: isize) -> String;
+
+    fn indent(&self, indent: isize) -> String {
+        let mut res = String::new();
+        for _ in 0..indent {
+            res += "    ";
         }
+        res
     }
 }
 
@@ -165,78 +119,45 @@ pub enum AExpr {
 }
 
 impl Pretty for AExpr {
-    #[allow(clippy::too_many_lines)]
-    fn to_doc(&self) -> RcDoc<()> {
+    fn pretty(&self, indent: isize) -> String {
         match self {
-            Self::Id(x) => RcDoc::as_string(x),
-            Self::Num(i) => RcDoc::as_string(i),
-            Self::Add(left, right) => RcDoc::text("(")
-                .append("+")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Sub(left, right) => RcDoc::text("(")
-                .append("-")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Mul(left, right) => RcDoc::text("(")
-                .append("*")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::Div(left, right) => RcDoc::text("(")
-                .append("/")
-                .append(RcDoc::softline())
-                .append(left.to_doc())
-                .append(RcDoc::softline())
-                .append(right.to_doc())
-                .append(")"),
-            Self::FCall(name, args) => RcDoc::text("(")
-                .append(name)
-                .append(RcDoc::softline())
-                .append(RcDoc::intersperse(
-                    args.iter().map(|e| e.to_doc()),
-                    RcDoc::space(),
-                ))
-                .append(")"),
-            Self::Redundant(expr) | Self::LoopInvariant(expr) => expr.to_doc(),
+            Self::Add(lhs, rhs) => {
+                format!("(+ {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Sub(lhs, rhs) => {
+                format!("(- {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Mul(lhs, rhs) => {
+                format!("(* {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Div(lhs, rhs) => {
+                format!("(/ {} {})", lhs.pretty(indent), rhs.pretty(indent))
+            }
+            Self::Id(id) => id.clone(),
+            Self::Num(n) => n.to_string(),
+            Self::FCall(name, args) => {
+                let mut res = format!("({name}");
+                for arg in args {
+                    res += &format!(" {}", arg.pretty(indent));
+                }
+                res += ")";
+                res
+            }
+            Self::Redundant(expr) | Self::LoopInvariant(expr) => {
+                expr.pretty(indent)
+            }
             Self::Derived {
                 basic,
                 factor,
                 offset,
-            } => RcDoc::text("(")
-                .append("+")
-                .append(RcDoc::softline())
-                .append(
-                    RcDoc::text("(")
-                        .append("*")
-                        .append(RcDoc::softline())
-                        .append(basic)
-                        .append(RcDoc::softline())
-                        .append(factor.to_doc())
-                        .append(")"),
+            } => {
+                format!(
+                    "(+ (* {basic} {}) {})",
+                    factor.pretty(indent),
+                    offset.pretty(indent)
                 )
-                .append(RcDoc::softline())
-                .append(offset.to_doc())
-                .append(")"),
+            }
         }
-    }
-}
-
-impl std::fmt::Display for AExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut v = Vec::new();
-        self.to_doc()
-            .render(80, &mut v)
-            .map_err(|_| std::fmt::Error)?;
-        write!(f, "{}", String::from_utf8_lossy(&v))
     }
 }
 
@@ -255,55 +176,52 @@ pub enum Statement {
 }
 
 impl Pretty for Statement {
-    #[allow(clippy::too_many_lines)]
-    fn to_doc(&self) -> RcDoc<()> {
+    fn pretty(&self, indent: isize) -> String {
         match self {
-            Self::Assign { dest, src } => RcDoc::text(dest)
-                .append(RcDoc::softline())
-                .append(":=")
-                .append(RcDoc::softline())
-                .append(src.to_doc())
-                .append(";")
-                .append(RcDoc::hardline()),
-            Self::Ret(None) => {
-                RcDoc::text("return").append(";").append(RcDoc::hardline())
+            Self::Assign { dest, src } => {
+                format!(
+                    "{}{dest} := {};",
+                    self.indent(indent),
+                    src.pretty(indent)
+                )
             }
-            Self::Ret(Some(expr)) => RcDoc::text("return")
-                .append(RcDoc::softline())
-                .append(expr.to_doc())
-                .append(";")
-                .append(RcDoc::hardline()),
-            Self::Throw(n, None) => RcDoc::text("throw")
-                .append("(")
-                .append(n.to_string())
-                .append(")")
-                .append(";")
-                .append(RcDoc::hardline()),
-            Self::Throw(n, Some(expr)) => RcDoc::text("throw")
-                .append("(")
-                .append(n.to_string())
-                .append(")")
-                .append(RcDoc::softline())
-                .append(expr.to_doc())
-                .append(";")
-                .append(RcDoc::hardline()),
-            Self::Print(exprs) => RcDoc::text("print")
-                .append(RcDoc::softline())
-                .append(RcDoc::intersperse(
-                    exprs.iter().map(Pretty::to_doc),
-                    RcDoc::space(),
-                ))
-                .append(";")
-                .append(RcDoc::hardline()),
-            Self::PCall(name, args) => RcDoc::text(name)
-                .append("(")
-                .append(RcDoc::intersperse(
-                    args.iter().map(Pretty::to_doc),
-                    RcDoc::text(",").append(RcDoc::softline()),
-                ))
-                .append(")")
-                .append(";")
-                .append(RcDoc::hardline()),
+            Self::Ret(None) => {
+                format!("{}return;", self.indent(indent),)
+            }
+            Self::Ret(Some(expr)) => {
+                format!(
+                    "{}return {};",
+                    self.indent(indent),
+                    expr.pretty(indent)
+                )
+            }
+            Self::Throw(n, None) => {
+                format!("{}throw({});", self.indent(indent), n)
+            }
+            Self::Throw(n, Some(expr)) => {
+                format!(
+                    "{}throw({}) {};",
+                    self.indent(indent),
+                    n,
+                    expr.pretty(indent)
+                )
+            }
+            Self::PCall(name, args) => {
+                let mut res = format!("{}({} ", self.indent(indent), name);
+                for arg in args {
+                    res += &format!(" {}", arg.pretty(indent));
+                }
+                res += ");";
+                res
+            }
+            Self::Print(args) => {
+                let mut res = format!("{}print!", self.indent(indent));
+                for arg in args {
+                    res += &format!(" {}", arg.pretty(indent));
+                }
+                res += ";";
+                res
+            }
         }
     }
 }
@@ -318,21 +236,15 @@ pub enum LoopStatement {
 }
 
 impl Pretty for LoopStatement {
-    fn to_doc(&self) -> RcDoc<()> {
+    fn pretty(&self, indent: isize) -> String {
         match self {
-            Self::Stmt(s) => s.to_doc(),
-            Self::Break(n) => RcDoc::text("break")
-                .append("(")
-                .append(n.to_string())
-                .append(")")
-                .append(";")
-                .append(RcDoc::hardline()),
-            Self::Continue(n) => RcDoc::text("continue")
-                .append("(")
-                .append(n.to_string())
-                .append(")")
-                .append(";")
-                .append(RcDoc::hardline()),
+            Self::Stmt(stmt) => stmt.pretty(indent),
+            Self::Break(n) => {
+                format!("{}break({});", self.indent(indent), n)
+            }
+            Self::Continue(n) => {
+                format!("{}continue({});", self.indent(indent), n)
+            }
         }
     }
 }
@@ -379,6 +291,7 @@ pub enum Block<T: Pretty> {
     },
     TryCatch {
         try_block: Vec<Self>,
+        catch_name: Option<String>,
         catch_block: Vec<Self>,
     },
     /// A block whose results are never used outside the block
@@ -386,86 +299,77 @@ pub enum Block<T: Pretty> {
     Stmt(T),
 }
 
-impl<T: Pretty> Block<T> {
+impl<T: Pretty> Pretty for Block<T> {
     #[allow(clippy::too_many_lines)]
-    pub fn to_doc(&self) -> RcDoc<()> {
+    fn pretty(&self, indent: isize) -> String {
         match self {
+            Self::Dead(stmts) => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res += "dead {\n";
+                for stmt in stmts {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "}";
+                res
+            }
             Self::If {
                 guard,
                 then,
                 otherwise,
-            } => RcDoc::text("if")
-                .append(RcDoc::softline())
-                .append(guard.to_doc())
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    then.iter().map(Self::to_doc),
-                    RcDoc::space(),
-                ))
-                .append(RcDoc::softline())
-                .append("}")
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("else")
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    otherwise.iter().map(Self::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
-            Self::While { var, limit, body } => RcDoc::text("while")
-                .append(RcDoc::softline())
-                .append(var)
-                .append(RcDoc::softline())
-                .append(limit.to_doc())
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    body.iter().map(Block::<LoopStatement>::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
+            } => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res += &format!("if {} {{\n", guard.pretty(indent));
+                for stmt in then {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "} else {\n";
+                for stmt in otherwise {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "}";
+                res
+            }
+            Self::While { var, limit, body } => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res +=
+                    &format!("while {} < {} {{\n", var, limit.pretty(indent));
+                for stmt in body {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "}";
+                res
+            }
             Self::For {
                 var,
                 init,
                 limit,
                 step,
                 body,
-            } => RcDoc::text("for")
-                .append(RcDoc::softline())
-                .append(var)
-                .append(" in ")
-                .append(init.to_doc())
-                .append(" .. ")
-                .append(limit.to_doc())
-                .append(RcDoc::softline())
-                .append(step.to_doc())
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    body.iter().map(Block::<LoopStatement>::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
+            } => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res += &format!(
+                    "for {} in {} .. {} by {} {{\n",
+                    var,
+                    init.pretty(indent),
+                    limit.pretty(indent),
+                    step.pretty(indent)
+                );
+                for stmt in body {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "}\n";
+                res
+            }
+            Self::Stmt(stmt) => stmt.pretty(indent),
             Self::MatchedFor {
                 var1,
                 var2,
@@ -474,151 +378,88 @@ impl<T: Pretty> Block<T> {
                 step,
                 body1,
                 body2,
-            } => RcDoc::text("for")
-                .append(RcDoc::softline())
-                .append(var1)
-                .append(" in ")
-                .append(init.to_doc())
-                .append(" .. ")
-                .append(limit.to_doc())
-                .append(RcDoc::softline())
-                .append(step.to_doc())
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    body1.iter().map(Block::<LoopStatement>::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline())
-                .append("for")
-                .append(RcDoc::softline())
-                .append(var2)
-                .append(" in ")
-                .append(init.to_doc())
-                .append(" .. ")
-                .append(limit.to_doc())
-                .append(RcDoc::softline())
-                .append(step.to_doc())
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    body2.iter().map(Block::<LoopStatement>::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
+            } => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res += &format!(
+                    "for {} in {} .. {} by {} {{\n",
+                    var1,
+                    init.pretty(indent),
+                    limit.pretty(indent),
+                    step.pretty(indent)
+                );
+                for stmt in body1 {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &format!("{}}}\n", self.indent(indent));
+                res += &format!(
+                    "for {} in {} .. {} by {} {{\n",
+                    var2,
+                    init.pretty(indent),
+                    limit.pretty(indent),
+                    step.pretty(indent),
+                );
+                for stmt in body2 {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "}";
+                res
+            }
+            Self::TryCatch {
+                try_block,
+                catch_name,
+                catch_block,
+            } => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res += "try {\n";
+                for stmt in try_block {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                let catch_var = catch_name
+                    .as_ref()
+                    .map_or_else(String::new, |name| name.clone() + " ");
+                res += &format!("}} catch {catch_var}{{\n",);
+                for stmt in catch_block {
+                    res += &format!("{}\n", stmt.pretty(indent + 1));
+                }
+                res += &self.indent(indent);
+                res += "}";
+                res
+            }
             Self::Switch {
                 guard,
                 cases,
                 default,
-            } => RcDoc::text("switch")
-                .append(RcDoc::softline())
-                .append(guard.to_doc())
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    cases
-                        .iter()
-                        .map(|(guard, body)| {
-                            RcDoc::text("case")
-                                .append(RcDoc::softline())
-                                .append(guard.to_doc())
-                                .append(RcDoc::softline())
-                                .append("{")
-                                .nest(4)
-                                .append(RcDoc::hardline())
-                                .append(RcDoc::intersperse(
-                                    body.iter().map(Self::to_doc),
-                                    RcDoc::space(),
-                                ))
-                                .nest(-4)
-                                .append(RcDoc::softline())
-                                .append("}")
-                                .append(RcDoc::hardline())
-                        })
-                        .chain(std::iter::once(
-                            RcDoc::text("default")
-                                .append(RcDoc::softline())
-                                .append("{")
-                                .nest(4)
-                                .append(RcDoc::softline())
-                                .append(RcDoc::intersperse(
-                                    default.iter().map(Self::to_doc),
-                                    RcDoc::space(),
-                                ))
-                                .nest(-4)
-                                .append(RcDoc::softline())
-                                .append("}")
-                                .append(RcDoc::hardline()),
-                        )),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
-            Self::TryCatch {
-                try_block,
-                catch_block,
-            } => RcDoc::text("try")
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    try_block.iter().map(Self::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::hardline())
-                .append("}")
-                .append(RcDoc::softline())
-                .append("catch")
-                .append(RcDoc::softline())
-                .append("{")
-                .nest(4)
-                .append(RcDoc::hardline())
-                .append(RcDoc::intersperse(
-                    catch_block.iter().map(Self::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
-            Self::Dead(body) => RcDoc::text("{")
-                .nest(4)
-                .append(RcDoc::softline())
-                .append(RcDoc::intersperse(
-                    body.iter().map(Self::to_doc),
-                    RcDoc::space(),
-                ))
-                .nest(-4)
-                .append(RcDoc::softline())
-                .append("}")
-                .append(RcDoc::hardline()),
-            Self::Stmt(s) => s.to_doc(),
+            } => {
+                let mut res = String::new();
+                res += &self.indent(indent);
+                res += &format!("switch {} {{\n", guard.pretty(indent));
+                for (guard, body) in cases {
+                    res += &format!(
+                        "{}{} => {{\n",
+                        self.indent(indent + 1),
+                        guard.pretty(0)
+                    );
+                    for stmt in body {
+                        res += &format!("{}\n", stmt.pretty(indent + 2));
+                    }
+                    res += &self.indent(indent + 1);
+                    res += "}\n";
+                }
+                res += &self.indent(indent + 1);
+                res += "_ => {\n";
+                for stmt in default {
+                    res += &format!("{}\n", stmt.pretty(indent + 2));
+                }
+                res += &self.indent(indent + 1);
+                res += "}\n";
+                res += &self.indent(indent);
+                res += "}";
+                res
+            }
         }
-    }
-}
-
-impl<T: Pretty> std::fmt::Display for Block<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut v = Vec::new();
-        self.to_doc()
-            .render(80, &mut v)
-            .map_err(|_| std::fmt::Error)?;
-        write!(f, "{}", String::from_utf8_lossy(&v))
     }
 }

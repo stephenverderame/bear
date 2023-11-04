@@ -70,6 +70,10 @@ pub(super) struct StackFrame {
     ret_type: Type,
     facts: AnalysisFacts,
     ret_intval: Option<Interval>,
+    /// Whether we can continue on the current path (no throws or returns)
+    can_follow: bool,
+    /// Whether the current path is dead
+    is_dead: bool,
 }
 
 /// The `StackLevel` keeps track of the current nesting level of the stack
@@ -82,15 +86,36 @@ pub(super) struct StackLevel {
 }
 
 impl StackFrame {
-    fn new_child(other: &Self) -> Self {
+    fn new_child(&self) -> Self {
         Self {
-            nests: other.nests.clone(),
-            facts: other.facts.clone(),
-            pending_step: other.pending_step,
-            pending_ret: other.pending_ret,
-            ret_type: other.ret_type,
-            ret_intval: other.ret_intval,
+            nests: self.nests.clone(),
+            facts: self.facts.clone(),
+            pending_step: self.pending_step,
+            pending_ret: self.pending_ret,
+            ret_type: self.ret_type,
+            ret_intval: self.ret_intval,
+            can_follow: self.can_follow,
+            is_dead: self.is_dead,
         }
+    }
+
+    fn dead_child(&self) -> Self {
+        Self {
+            nests: self.nests.clone(),
+            facts: AnalysisFacts::default(),
+            pending_step: StepType::None,
+            pending_ret: false,
+            ret_type: Type::Void,
+            ret_intval: None,
+            can_follow: true,
+            is_dead: true,
+        }
+    }
+
+    fn try_child(&self, t: Type) -> Self {
+        let mut c = self.new_child();
+        c.nests.nested_trys.push(t);
+        c
     }
 }
 
@@ -98,7 +123,10 @@ impl StackFrame {
     /// Meets two stack frames of siblings
     /// Sibilings are two blocks on the same level of the call stack
     /// (i.e. they have the same parent such as the `then` and `else` blocks of an if statement)
-    fn meet(self, other: &Self) -> Self {
+    #[allow(clippy::needless_pass_by_value)]
+    pub(super) fn meet(self, other: Self) -> Self {
+        // we pass by value so we consume the stack frame which prevents
+        // us from accidentally meeting and then mutating the same stack frame
         Self {
             nests: self.nests,
             facts: AnalysisFacts::meet(self.facts, &other.facts),
@@ -116,6 +144,8 @@ impl StackFrame {
             pending_ret: self.pending_ret || other.pending_ret,
             ret_type: self.ret_type,
             ret_intval: self.ret_intval,
+            can_follow: self.can_follow || other.can_follow,
+            is_dead: self.is_dead && other.is_dead,
         }
     }
 }
@@ -129,6 +159,8 @@ impl Default for StackFrame {
             pending_ret: Default::default(),
             ret_type: Type::Void,
             ret_intval: Option::default(),
+            can_follow: true,
+            is_dead: false,
         }
     }
 }
@@ -194,6 +226,15 @@ impl<'a> Context<'a> {
     pub fn child_frame(&'a self) -> Self {
         Self {
             cur: StackFrame::new_child(&self.cur),
+            parent: Some(self),
+        }
+    }
+
+    /// Constructs a new context with the current context as its parent
+    /// where no analysis facts are passed to the child
+    pub fn dead_child_frame(&'a self) -> Self {
+        Self {
+            cur: StackFrame::dead_child(&self.cur),
             parent: Some(self),
         }
     }
@@ -304,8 +345,8 @@ impl<'a> Context<'a> {
     /// # Arguments
     /// * `nests` - The nesting level of the parent context we are joining into
     /// * `other` - The sibling context we are joining with
-    pub(super) fn meet(child1: Self, child2: &Self) -> StackFrame {
-        child1.cur.meet(&child2.cur)
+    pub(super) fn meet(child1: Self, child2: Self) -> StackFrame {
+        child1.cur.meet(child2.cur)
     }
 
     /// Updates the current context with a new current stack frame
@@ -314,5 +355,40 @@ impl<'a> Context<'a> {
     pub(super) fn update(&mut self, mut other: StackFrame) {
         other.nests = self.cur.nests.clone();
         self.cur = other;
+    }
+
+    pub(super) const fn can_follow(&self) -> bool {
+        self.cur.can_follow
+    }
+
+    /// Indicates the current context returns from the current function
+    pub(super) fn set_return(&mut self) {
+        self.cur.pending_ret = false;
+        self.cur.can_follow = false;
+    }
+
+    /// Indicates the current context throws an exception
+    pub(super) fn set_throw(&mut self) {
+        self.cur.can_follow = false;
+    }
+
+    pub(super) const fn is_dead(&self) -> bool {
+        self.cur.is_dead
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    pub(super) fn stack_frame(self) -> StackFrame {
+        self.cur
+    }
+
+    pub(super) fn meet_sf(a: StackFrame, b: Self) -> StackFrame {
+        a.meet(b.cur)
+    }
+
+    pub(super) fn try_child(&'a self, t: Type) -> Self {
+        Self {
+            cur: self.cur.try_child(t),
+            parent: Some(self),
+        }
     }
 }

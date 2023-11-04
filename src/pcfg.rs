@@ -1,3 +1,5 @@
+use crate::generator::{TypeChoice, NUM_TYPES};
+
 use super::bare_c::*;
 use strum::EnumCount;
 
@@ -189,7 +191,7 @@ pub struct StmtPCFG {
 }
 
 impl PCFG for StmtPCFG {
-    fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
+    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
         let mut out = <[f64; Statement::COUNT]>::serialize(&self.choice, out);
         out.push(PSpace(vec![self.new_var]));
         out.push(PSpace(vec![self.var_type]));
@@ -259,7 +261,7 @@ impl PCFG for LoopStmtPCFG {
 /// PCFG for an if statement
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IfPCFG<P: PCFG> {
-    pub guard: BExprPCFG,
+    pub guard: ExprPCFG,
     pub child: P,
 }
 
@@ -277,7 +279,7 @@ impl<P: PCFG> PCFG for IfPCFG<P> {
     {
         let mut res = Self::default();
         let (child, input) = P::deserialize(input);
-        let (guard, input) = BExprPCFG::deserialize(input);
+        let (guard, input) = ExprPCFG::deserialize(input);
         res.child = child;
         res.guard = guard;
         (res, input)
@@ -285,7 +287,7 @@ impl<P: PCFG> PCFG for IfPCFG<P> {
 
     fn uniform() -> Self {
         Self {
-            guard: BExprPCFG::uniform(),
+            guard: ExprPCFG::uniform(),
             child: P::uniform(),
         }
     }
@@ -334,6 +336,8 @@ pub struct BlockPCFG<T: PCFG> {
     pub loop_pcfg: LoopPCFG,
     pub stmt: T,
     pub seq: f64,
+    pub case_seq: f64,
+    pub case_try_type: TypeChoice,
 }
 
 impl<T: PCFG> PCFG for BlockPCFG<T> {
@@ -343,24 +347,30 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
         out = self.loop_pcfg.serialize(out);
         out = self.stmt.serialize(out);
         out.push(PSpace(vec![self.seq]));
+        out.push(PSpace(vec![self.case_seq]));
+        out = self.case_try_type.serialize(out);
         out
     }
 
-    fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
     where
         Self: Sized,
     {
         let mut res = Self::default();
+        let (case_try_type, mut input) = TypeChoice::deserialize(input);
+        let case_seq = pop_singleton(&mut input);
         let seq = pop_singleton(&mut input);
         let (stmt_pcfg, input) = T::deserialize(input);
         let (loop_pcfg, input) = LoopPCFG::deserialize(input);
         let (if_pcfg, input) = IfPCFG::deserialize(input);
         let (choice, input) = <[f64; StmtBlock::COUNT]>::deserialize(input);
         res.seq = seq;
+        res.case_seq = case_seq;
         res.stmt = stmt_pcfg;
         res.loop_pcfg = loop_pcfg;
         res.if_pcfg = if_pcfg;
         res.choice = choice;
+        res.case_try_type = case_try_type;
         (res, input)
     }
 
@@ -374,6 +384,8 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
             stmt: T::uniform(),
             loop_pcfg: LoopPCFG::uniform(),
             seq: 0.5_f64.ln(),
+            case_seq: 0.5_f64.ln(),
+            case_try_type: TypeChoice::uniform(),
         }
     }
 
@@ -389,7 +401,6 @@ pub struct TopPCFG {
     pub loop_block: BlockPCFG<LoopStmtPCFG>,
     pub expr: ExprPCFG,
     pub fn_pcfg: FnPCFG,
-    pub catch_type: [f64; 3],
 }
 
 impl PCFG for TopPCFG {
@@ -397,16 +408,13 @@ impl PCFG for TopPCFG {
         let out = self.block.serialize(out);
         let out = self.loop_block.serialize(out);
         let out = self.expr.serialize(out);
-        let mut out = self.fn_pcfg.serialize(out);
-        out.push(PSpace(self.catch_type.to_vec()));
-        out
+        self.fn_pcfg.serialize(out)
     }
 
-    fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
     where
         Self: Sized,
     {
-        let catch_type = input.pop().unwrap().0.try_into().unwrap();
         let (fn_pcfg, input) = FnPCFG::deserialize(input);
         let (expr, input) = ExprPCFG::deserialize(input);
         let (loop_block, input) = BlockPCFG::<LoopStmtPCFG>::deserialize(input);
@@ -417,7 +425,6 @@ impl PCFG for TopPCFG {
                 loop_block,
                 expr,
                 fn_pcfg,
-                catch_type,
             },
             input,
         )
@@ -428,7 +435,6 @@ impl PCFG for TopPCFG {
         Self: Sized,
     {
         Self {
-            catch_type: [(1.0 / 3.0_f64).ln(); 3],
             fn_pcfg: FnPCFG::uniform(),
             block: BlockPCFG::<StmtPCFG>::uniform(),
             loop_block: BlockPCFG::<LoopStmtPCFG>::uniform(),
@@ -486,6 +492,7 @@ impl PCFG for FnPCFG {
 support::array_pcfg!([f64; Statement::COUNT]);
 support::array_pcfg!([f64; LoopStatement::COUNT]);
 support::array_pcfg!([f64; StmtBlock::COUNT]);
+support::array_pcfg!([f64; NUM_TYPES]);
 
 #[cfg(test)]
 mod serialization_test {

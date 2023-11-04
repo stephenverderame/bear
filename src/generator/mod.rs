@@ -3,9 +3,12 @@ use rand::prelude::*;
 use strum::EnumCount;
 mod interval;
 use interval::Interval;
+use strum_macros::EnumCount;
+use support::Indexable;
 mod context;
+mod control_flow;
 
-use crate::bare_c::{BExpr, Block, Expr, Statement};
+use crate::bare_c::{BExpr, Block, Expr, Pretty, Statement};
 use crate::generator::context::FuncList;
 use crate::pcfg::{ExprPCFG, StmtPCFG};
 /// Overflow is not an error in BRIL, so we just don't worry about it.
@@ -21,15 +24,18 @@ use crate::{
 
 use self::context::Context;
 
-const EXPR_FUEL: usize = 10;
-const STMT_FUEL: usize = 4;
+const EXPR_FUEL: usize = 5;
+const STMT_FUEL: usize = 6;
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
 enum Type {
     Int,
     Bool,
     Void,
 }
+
+pub const NUM_TYPES: usize = Type::COUNT;
+pub type TypeChoice = [f64; NUM_TYPES];
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 enum StepType {
@@ -188,6 +194,7 @@ struct Distribs {
     stmt_idx: WeightedIndex<f64>,
     block_idx: WeightedIndex<f64>,
     uniform: Uniform<f64>,
+    type_idx: WeightedIndex<f64>,
 }
 
 impl Distribs {
@@ -208,6 +215,10 @@ impl Distribs {
             .unwrap(),
             block_idx: WeightedIndex::new(
                 pcfg.block.choice.iter().map(|x| x.exp()),
+            )
+            .unwrap(),
+            type_idx: WeightedIndex::new(
+                pcfg.block.case_try_type.iter().map(|x| x.exp()),
             )
             .unwrap(),
             uniform,
@@ -432,6 +443,7 @@ fn gen_bexpr(
 ) -> (BExpr, Vec<String>) {
     let idx = distrib.bexpr_idx.sample(&mut rand::thread_rng());
     let mut is_redundant = false;
+    let idx = if fuel == 0 { BExpr::BOOL_IDX } else { idx };
     #[allow(clippy::map_unwrap_or)]
     let (expr, vars) = match idx {
         BExpr::AND_IDX | BExpr::OR_IDX | BExpr::EQB_IDX => {
@@ -495,9 +507,9 @@ fn gen_assign(
     let var = if distribs.uniform.sample(&mut thread_rng()) < pcfg.new_var.exp()
     {
         if typ == Type::Int {
-            get_rand_avar(ctx).unwrap()
+            get_rand_avar(ctx).unwrap_or_else(|| ctx.new_var())
         } else {
-            get_rand_bvar(ctx).unwrap()
+            get_rand_bvar(ctx).unwrap_or_else(|| ctx.new_var())
         }
     } else {
         ctx.new_var()
@@ -527,6 +539,7 @@ fn gen_throw(
     funcs: &mut FuncList,
 ) -> Statement {
     if let Some((idx, typ)) = ctx.rand_catch(&distribs.uniform) {
+        ctx.set_throw();
         match typ {
             Type::Int => {
                 let (expr, _) = gen_aexpr(
@@ -558,7 +571,11 @@ fn gen_stmt(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
 ) -> Statement {
-    let idx = distribs.stmt_idx.sample(&mut rand::thread_rng());
+    let idx = if ctx.is_dead() {
+        Statement::ASSIGN_IDX
+    } else {
+        distribs.stmt_idx.sample(&mut rand::thread_rng())
+    };
     match idx {
         Statement::ASSIGN_IDX => {
             gen_assign(pcfg, expr_pcfg, ctx, distribs, funcs)
@@ -567,14 +584,19 @@ fn gen_stmt(
             let (expr, info) =
                 gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
             ctx.union_ret_rng(info.interval);
+            ctx.set_return();
             Statement::Ret(Some(Expr::AExpr(expr)))
         }
         Statement::RET_IDX if ctx.ret_type() == Type::Bool => {
             let (expr, _) =
                 gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+            ctx.set_return();
             Statement::Ret(Some(Expr::BExpr(expr)))
         }
-        Statement::RET_IDX => Statement::Ret(None),
+        Statement::RET_IDX => {
+            ctx.set_return();
+            Statement::Ret(None)
+        }
         Statement::THROW_IDX => {
             gen_throw(pcfg, expr_pcfg, ctx, distribs, funcs)
         }
@@ -589,85 +611,6 @@ fn gen_stmt(
     }
 }
 
-/// Generates an if statement
-fn gen_if(
-    pcfg: &TopPCFG,
-    expr_pcfg: &ExprPCFG,
-    ctx: &mut Context,
-    distribs: &mut Distribs,
-    funcs: &mut FuncList,
-    fuel: usize,
-) -> Block<Statement> {
-    let (cond, _) = gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
-    let mut true_frame = ctx.child_frame();
-    let mut false_frame = ctx.child_frame();
-    let then_block =
-        gen_blocks(pcfg, expr_pcfg, &mut true_frame, distribs, funcs, fuel - 1);
-    let else_block = gen_blocks(
-        pcfg,
-        expr_pcfg,
-        &mut false_frame,
-        distribs,
-        funcs,
-        fuel - 1,
-    );
-    let sf = Context::meet(true_frame, &false_frame);
-    ctx.update(sf);
-    Block::If {
-        guard: cond,
-        then: then_block,
-        otherwise: else_block,
-    }
-}
-
-/// Generates a sequence of blocks
-fn gen_blocks(
-    pcfg: &TopPCFG,
-    expr_pcfg: &ExprPCFG,
-    ctx: &mut Context,
-    distribs: &mut Distribs,
-    funcs: &mut FuncList,
-    fuel: usize,
-) -> Vec<Block<Statement>> {
-    let mut res = vec![];
-    while distribs.uniform.sample(&mut thread_rng()) < pcfg.block.seq.exp()
-        && fuel > 0
-    {
-        res.push(gen_block(pcfg, expr_pcfg, ctx, distribs, funcs, fuel));
-    }
-    res
-}
-
-fn gen_block(
-    pcfg: &TopPCFG,
-    expr_pcfg: &ExprPCFG,
-    ctx: &mut Context,
-    distribs: &mut Distribs,
-    funcs: &mut FuncList,
-    fuel: usize,
-) -> Block<Statement> {
-    let idx = distribs.block_idx.sample(&mut rand::thread_rng());
-    match idx {
-        Block::<Statement>::DEAD_IDX => Block::Dead(gen_blocks(
-            pcfg,
-            expr_pcfg,
-            &mut ctx.child_frame(),
-            distribs,
-            funcs,
-            fuel - 1,
-        )),
-        Block::<Statement>::STMT_IDX => {
-            let stmt =
-                gen_stmt(&pcfg.block.stmt, expr_pcfg, ctx, distribs, funcs);
-            Block::Stmt(stmt)
-        }
-        Block::<Statement>::IF_IDX => {
-            gen_if(pcfg, expr_pcfg, ctx, distribs, funcs, fuel)
-        }
-        _ => gen_block(pcfg, expr_pcfg, ctx, distribs, funcs, fuel),
-    }
-}
-
 pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
     let mut funcs = FuncList::new();
     let mut ctx = Context::make_root();
@@ -676,8 +619,8 @@ pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
     ctx.new_avar("c", Interval::new(0, 100));
     ctx.new_bvar("d");
     ctx.new_bvar("e");
-    gen_blocks(
-        pcfg,
+    control_flow::gen_blocks(
+        &pcfg.block,
         &pcfg.expr,
         &mut ctx,
         &mut Distribs::new(pcfg),
@@ -689,7 +632,8 @@ pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
 pub fn display(program: &[Block<Statement>]) -> String {
     let mut res = String::new();
     for block in program {
-        res += &format!("{}", block);
+        res += &block.pretty(0);
+        res += "\n";
     }
     res
 }
