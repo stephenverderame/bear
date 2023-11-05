@@ -8,9 +8,9 @@ use support::Indexable;
 mod context;
 mod control_flow;
 
-use crate::bare_c::{BExpr, Block, Expr, Pretty, Statement};
+use crate::bare_c::{BExpr, Block, Expr, LoopStatement, Pretty, Statement};
 use crate::generator::context::FuncList;
-use crate::pcfg::{ExprPCFG, StmtPCFG};
+use crate::pcfg::{ExprPCFG, StatementPCFG, StmtPCFG};
 /// Overflow is not an error in BRIL, so we just don't worry about it.
 /// Furthermore, we use random probing for a few reasons:
 /// 1. We don't want small programs
@@ -84,6 +84,20 @@ impl ExprInfo {
             interval: self.interval.union(rhs.interval),
         }
     }
+
+    pub const fn make_unknown() -> Self {
+        Self {
+            vars: Vec::new(),
+            interval: Interval::make_unknown(),
+        }
+    }
+
+    pub const fn from_interval(interval: Interval) -> Self {
+        Self {
+            vars: Vec::new(),
+            interval,
+        }
+    }
 }
 
 impl std::ops::Add<Self> for ExprInfo {
@@ -134,8 +148,20 @@ fn get_rand_avar(ctx: &Context) -> Option<String> {
     ctx.get_avars().choose(&mut rand::thread_rng()).cloned()
 }
 
+fn get_rand_mutable_avar(ctx: &Context) -> Option<String> {
+    ctx.get_mutable_avars()
+        .choose(&mut rand::thread_rng())
+        .cloned()
+}
+
 fn get_rand_bvar(ctx: &Context) -> Option<String> {
     ctx.get_bvars().choose(&mut rand::thread_rng()).cloned()
+}
+
+fn get_rand_mutable_bvar(ctx: &Context) -> Option<String> {
+    ctx.get_mutable_bvars()
+        .choose(&mut rand::thread_rng())
+        .cloned()
 }
 
 fn get_rand_prev_aexpr(ctx: &Context) -> Option<(AExpr, ExprInfo)> {
@@ -337,12 +363,9 @@ fn gen_aexpr(
         }
         // can't use unwrap_or bc we need to borrow ctx mutably
         // and thus can't have the lifetimes overlap
-        AExpr::LOOPINVARIANT_IDX => ctx
-            .loop_inv()
-            .map(|f| {
-                gen_aexpr(pcfg, &mut f.child_frame(), distrib, funcs, fuel - 1)
-            })
-            .unwrap_or_else(|| gen_aexpr(pcfg, ctx, distrib, funcs, fuel - 1)),
+        AExpr::LOOPINVARIANT_IDX => {
+            gen_aexpr(pcfg, &mut ctx.loop_inv(), distrib, funcs, fuel - 1)
+        }
         AExpr::DERIVED_IDX => gen_aexpr(pcfg, ctx, distrib, funcs, fuel - 1), // TODO Derived
         _ => unreachable!(),
     };
@@ -472,12 +495,10 @@ fn gen_bexpr(
             .map(|x| (BExpr::Id(x.clone()), vec![x]))
             .unwrap_or_else(|| gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1)),
         BExpr::FCALL_IDX => gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1), // TODO FCall
-        BExpr::LOOPINVARIANT_IDX => ctx
-            .loop_inv()
-            .map(|f| {
-                gen_bexpr(pcfg, &mut f.child_frame(), distrib, funcs, fuel - 1)
-            })
-            .unwrap_or_else(|| gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1)),
+        BExpr::LOOPINVARIANT_IDX => {
+            let mut li_frame = ctx.loop_inv();
+            gen_bexpr(pcfg, &mut li_frame, distrib, funcs, fuel - 1)
+        }
         x => unreachable!("Invalid index: {}", x),
     };
     if !is_redundant
@@ -491,25 +512,27 @@ fn gen_bexpr(
 
 /// Generates an assignment statement, updating the context accordingly
 /// for dataflow updates
-fn gen_assign(
-    pcfg: &StmtPCFG,
+fn gen_assign<P: StatementPCFG>(
+    pcfg: &P,
     expr_pcfg: &ExprPCFG,
     ctx: &mut Context,
     distribs: &mut Distribs,
     funcs: &mut FuncList,
 ) -> Statement {
-    let typ =
-        if distribs.uniform.sample(&mut thread_rng()) < pcfg.var_type.exp() {
-            Type::Int
-        } else {
-            Type::Bool
-        };
-    let var = if distribs.uniform.sample(&mut thread_rng()) < pcfg.new_var.exp()
+    let typ = if distribs.uniform.sample(&mut thread_rng())
+        >= pcfg.get_bool_type().exp()
+    {
+        Type::Int
+    } else {
+        Type::Bool
+    };
+    let var = if distribs.uniform.sample(&mut thread_rng())
+        < pcfg.get_new_var().exp()
     {
         if typ == Type::Int {
-            get_rand_avar(ctx).unwrap_or_else(|| ctx.new_var())
+            get_rand_mutable_avar(ctx).unwrap_or_else(|| ctx.new_var())
         } else {
-            get_rand_bvar(ctx).unwrap_or_else(|| ctx.new_var())
+            get_rand_mutable_bvar(ctx).unwrap_or_else(|| ctx.new_var())
         }
     } else {
         ctx.new_var()
@@ -518,11 +541,12 @@ fn gen_assign(
     let expr = if typ == Type::Int {
         let (expr, expr_info) =
             gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
-        ctx.new_avar(&var, expr_info.interval);
+        ctx.new_avar(&var, expr_info);
         Expr::AExpr(expr)
     } else {
-        let (expr, _) = gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
-        ctx.new_bvar(&var);
+        let (expr, info) =
+            gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+        ctx.new_bvar(&var, info);
         Expr::BExpr(expr)
     };
     Statement::Assign {
@@ -531,13 +555,13 @@ fn gen_assign(
     }
 }
 
-fn gen_throw(
-    pcfg: &StmtPCFG,
+fn gen_throw<P: StatementPCFG>(
+    pcfg: &P,
     expr_pcfg: &ExprPCFG,
     ctx: &mut Context,
     distribs: &mut Distribs,
     funcs: &mut FuncList,
-) -> Statement {
+) -> StatementEnum {
     if let Some((idx, typ)) = ctx.rand_catch(&distribs.uniform) {
         ctx.set_throw();
         match typ {
@@ -550,78 +574,147 @@ fn gen_throw(
                     EXPR_FUEL,
                 );
                 // TODO: interval info
-                Statement::Throw(idx, Some(Expr::AExpr(expr)))
+                StatementEnum::Statement(Statement::Throw(
+                    idx,
+                    Some(Expr::AExpr(expr)),
+                ))
             }
             Type::Bool => {
                 let (expr, _) =
                     gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
-                Statement::Throw(idx, Some(Expr::BExpr(expr)))
+                StatementEnum::Statement(Statement::Throw(
+                    idx,
+                    Some(Expr::BExpr(expr)),
+                ))
             }
-            Type::Void => Statement::Throw(idx, None),
+            Type::Void => StatementEnum::Statement(Statement::Throw(idx, None)),
         }
     } else {
-        gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs)
+        gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
+    }
+}
+pub enum StatementEnum {
+    Statement(Statement),
+    LoopStmt(LoopStatement),
+}
+pub trait StatementTy {
+    fn from(stmt: StatementEnum) -> Self
+    where
+        Self: Sized;
+}
+
+fn gen_loop_stmt(ctx: &mut Context, x: usize) -> StatementEnum {
+    // loop statements start indexing after the normal statements
+    match x {
+        x if x == LoopStatement::BREAK_IDX - 1 + Statement::COUNT => {
+            ctx.set_loop_exit();
+            StatementEnum::LoopStmt(LoopStatement::Break(
+                Uniform::new(0, ctx.loop_depth()).sample(&mut thread_rng()),
+            ))
+        }
+        x if x == LoopStatement::CONTINUE_IDX - 1 + Statement::COUNT => {
+            ctx.set_loop_exit();
+            StatementEnum::LoopStmt(LoopStatement::Continue(
+                Uniform::new(0, ctx.loop_depth()).sample(&mut thread_rng()),
+            ))
+        }
+        _ => unreachable!(),
     }
 }
 
-fn gen_stmt(
-    pcfg: &StmtPCFG,
+/// Generates a statement
+/// # Arguments
+/// * `pcfg` - The PCFG to use
+/// * `expr_pcfg` - The PCFG to use for expressions
+/// * `ctx` - The context to use
+/// * `distrib` - The distribution to use
+/// * `funcs` - The list of functions
+/// * `idx` - The index of the statement to generate or None to sample
+/// # Returns
+/// * The generated statement
+fn gen_stmt<P: StatementPCFG>(
+    pcfg: &P,
     expr_pcfg: &ExprPCFG,
     ctx: &mut Context,
     distribs: &mut Distribs,
     funcs: &mut FuncList,
-) -> Statement {
+    idx: Option<usize>,
+) -> StatementEnum {
     let idx = if ctx.is_dead() {
         Statement::ASSIGN_IDX
     } else {
-        distribs.stmt_idx.sample(&mut rand::thread_rng())
+        idx.unwrap_or_else(|| {
+            WeightedIndex::new(pcfg.get_choice().iter().map(|x| x.exp()))
+                .unwrap()
+                .sample(&mut rand::thread_rng())
+        })
     };
     match idx {
-        Statement::ASSIGN_IDX => {
-            gen_assign(pcfg, expr_pcfg, ctx, distribs, funcs)
-        }
+        Statement::ASSIGN_IDX => StatementEnum::Statement(gen_assign(
+            pcfg, expr_pcfg, ctx, distribs, funcs,
+        )),
         Statement::RET_IDX if ctx.ret_type() == Type::Int => {
             let (expr, info) =
                 gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
             ctx.union_ret_rng(info.interval);
             ctx.set_return();
-            Statement::Ret(Some(Expr::AExpr(expr)))
+            StatementEnum::Statement(Statement::Ret(Some(Expr::AExpr(expr))))
         }
         Statement::RET_IDX if ctx.ret_type() == Type::Bool => {
             let (expr, _) =
                 gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
             ctx.set_return();
-            Statement::Ret(Some(Expr::BExpr(expr)))
+            StatementEnum::Statement(Statement::Ret(Some(Expr::BExpr(expr))))
         }
         Statement::RET_IDX => {
             ctx.set_return();
-            Statement::Ret(None)
+            StatementEnum::Statement(Statement::Ret(None))
         }
         Statement::THROW_IDX => {
             gen_throw(pcfg, expr_pcfg, ctx, distribs, funcs)
         }
-        Statement::PRINT_IDX => Statement::Print(
+        Statement::PRINT_IDX => StatementEnum::Statement(Statement::Print(
             get_rand_avar(ctx)
                 .map(|x| vec![Expr::AExpr(AExpr::Id(x))])
                 .unwrap_or_default(),
-        ),
+        )),
         // TODO
-        Statement::PCALL_IDX => gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs),
-        _ => unreachable!(),
+        Statement::PCALL_IDX => {
+            gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
+        }
+        x => gen_loop_stmt(ctx, x),
+    }
+}
+
+impl StatementTy for Statement {
+    fn from(stmt: StatementEnum) -> Self {
+        match stmt {
+            StatementEnum::Statement(stmt) => stmt,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl StatementTy for LoopStatement {
+    fn from(stmt: StatementEnum) -> Self {
+        match stmt {
+            StatementEnum::Statement(stmt) => Self::Stmt(stmt),
+            StatementEnum::LoopStmt(stmt) => stmt,
+        }
     }
 }
 
 pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
     let mut funcs = FuncList::new();
     let mut ctx = Context::make_root();
-    ctx.new_avar("a", Interval::new(0, 100));
-    ctx.new_avar("b", Interval::new(0, 100));
-    ctx.new_avar("c", Interval::new(0, 100));
-    ctx.new_bvar("d");
-    ctx.new_bvar("e");
+    ctx.new_avar("a", ExprInfo::from_interval(Interval::new(0, 100)));
+    ctx.new_avar("b", ExprInfo::from_interval(Interval::new(0, 100)));
+    ctx.new_avar("c", ExprInfo::from_interval(Interval::new(0, 100)));
+    ctx.new_bvar("d", vec![]);
+    ctx.new_bvar("e", vec![]);
     control_flow::gen_blocks(
         &pcfg.block,
-        &pcfg.expr,
+        pcfg,
         &mut ctx,
         &mut Distribs::new(pcfg),
         &mut funcs,

@@ -16,6 +16,8 @@ pub(super) struct AnalysisFacts {
     bvars: HashSet<String>,
     available_aexprs: HashMap<AExpr, ExprInfo>,
     available_bexprs: HashMap<BExpr, Vec<String>>,
+    // variables that cannot be mutated by a non-loop invariant expression
+    pinned: HashSet<String>,
 }
 
 impl AnalysisFacts {
@@ -46,11 +48,18 @@ impl AnalysisFacts {
                 available_bexprs.insert(k, v);
             }
         }
+        let mut loop_invariant = HashSet::new();
+        for k in a.pinned {
+            if b.pinned.contains(&k) {
+                loop_invariant.insert(k);
+            }
+        }
         Self {
             avars,
             bvars,
             available_aexprs,
             available_bexprs,
+            pinned: loop_invariant,
         }
     }
 }
@@ -117,6 +126,39 @@ impl StackFrame {
         c.nests.nested_trys.push(t);
         c
     }
+
+    fn loop_child(&self, step: StepType, pin_prob: f64) -> Self {
+        let mut c = self.new_child();
+        for nm in self
+            .facts
+            .avars
+            .keys()
+            .chain(self.facts.bvars.iter())
+            .filter(|&x| !self.facts.pinned.contains(x))
+        {
+            if rand::thread_rng().gen_range(0_f64..1_f64) < pin_prob.exp() {
+                c.facts.pinned.insert(nm.clone());
+            } else {
+                break;
+            }
+        }
+        c.nests.nested_loops += 1;
+        c.pending_step = step;
+        c
+    }
+
+    fn loop_inv_ctx(&self) -> Self {
+        let mut c = self.new_child();
+        c.facts.avars.retain(|k, _| self.facts.pinned.contains(k));
+        c.facts.bvars.retain(|k| self.facts.pinned.contains(k));
+        c.facts.available_aexprs.retain(|_, v| {
+            v.vars.iter().all(|x| self.facts.pinned.contains(x))
+        });
+        c.facts
+            .available_bexprs
+            .retain(|_, v| v.iter().all(|x| self.facts.pinned.contains(x)));
+        c
+    }
 }
 
 impl StackFrame {
@@ -181,6 +223,31 @@ impl<'a> Context<'a> {
         self.cur.facts.avars.keys().cloned().collect()
     }
 
+    pub fn get_mutable_avars(&self) -> Vec<String> {
+        self.cur
+            .facts
+            .avars
+            .iter()
+            .filter_map(|(n, _)| {
+                if self.cur.facts.pinned.contains(n) {
+                    None
+                } else {
+                    Some(n.clone())
+                }
+            })
+            .collect()
+    }
+
+    pub fn get_mutable_bvars(&self) -> Vec<String> {
+        self.cur
+            .facts
+            .bvars
+            .iter()
+            .filter(|&n| !self.cur.facts.pinned.contains(n))
+            .cloned()
+            .collect()
+    }
+
     pub fn get_bvars(&self) -> Vec<String> {
         self.cur.facts.bvars.iter().cloned().collect()
     }
@@ -205,20 +272,14 @@ impl<'a> Context<'a> {
 
     /// Gets the context right before a loop in the stack frame
     /// This may be the context before the nearest loop, or a parent loop
-    #[deprecated(note = "Fix this, use a dataflow")]
-    pub fn loop_inv(&self) -> Option<&Context<'a>> {
+    pub fn loop_inv(&'a self) -> Context<'a> {
         if self.cur.nests.nested_loops == 0 {
-            Some(self)
+            self.child_frame()
         } else {
-            // TODO: fix this (make a loop invariant child context?)
-            let nesting_level = Uniform::from(0..self.cur.nests.nested_loops)
-                .sample(&mut rand::thread_rng());
-            while let Some(p) = self.parent {
-                if p.cur.nests.nested_loops <= nesting_level {
-                    return Some(p);
-                }
+            Self {
+                cur: self.cur.loop_inv_ctx(),
+                parent: Some(self),
             }
-            None
         }
     }
 
@@ -235,6 +296,13 @@ impl<'a> Context<'a> {
     pub fn dead_child_frame(&'a self) -> Self {
         Self {
             cur: StackFrame::dead_child(&self.cur),
+            parent: Some(self),
+        }
+    }
+
+    pub fn loop_child_frame(&'a self, step: StepType, pin_prob: f64) -> Self {
+        Self {
+            cur: self.cur.loop_child(step, pin_prob),
             parent: Some(self),
         }
     }
@@ -267,11 +335,11 @@ impl<'a> Context<'a> {
         self.cur.facts.available_bexprs.insert(expr, vars);
     }
 
-    pub(super) fn new_avar(&mut self, name: &str, interval: Interval) {
-        self.cur.facts.avars.insert(name.to_string(), interval);
+    pub(super) fn new_avar(&mut self, name: &str, info: ExprInfo) {
+        self.cur.facts.avars.insert(name.to_string(), info.interval);
     }
 
-    pub(super) fn new_bvar(&mut self, name: &str) {
+    pub(super) fn new_bvar(&mut self, name: &str, _: Vec<String>) {
         self.cur.facts.bvars.insert(name.to_string());
     }
 
@@ -340,6 +408,18 @@ impl<'a> Context<'a> {
         Some((idx, self.cur.nests.nested_trys[idx]))
     }
 
+    /// Returns the current loop depth
+    pub(super) const fn loop_depth(&self) -> usize {
+        self.cur.nests.nested_loops
+    }
+
+    /// Sets the specified variables as pinned (loop invariant)
+    pub(super) fn pin_vars(&mut self, vars: &[String]) {
+        for v in vars {
+            self.cur.facts.pinned.insert(v.clone());
+        }
+    }
+
     /// Meets the current context with another, sibling context, popping the bottom
     /// stack frame and returning it
     /// # Arguments
@@ -369,6 +449,10 @@ impl<'a> Context<'a> {
 
     /// Indicates the current context throws an exception
     pub(super) fn set_throw(&mut self) {
+        self.cur.can_follow = false;
+    }
+
+    pub(super) fn set_loop_exit(&mut self) {
         self.cur.can_follow = false;
     }
 

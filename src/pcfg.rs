@@ -190,6 +190,18 @@ pub struct StmtPCFG {
     pub var_type: f64,
 }
 
+/// A PCFG for a statement
+pub trait StatementPCFG: PCFG {
+    const COUNT: usize;
+
+    /// Returns the choice probabilities for this statement
+    fn get_choice(&self) -> &[f64];
+    /// Returns the probability of creating a new variable
+    fn get_new_var(&self) -> f64;
+    /// Returns the probability of creating a boolean
+    fn get_bool_type(&self) -> f64;
+}
+
 impl PCFG for StmtPCFG {
     fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
         let mut out = <[f64; Statement::COUNT]>::serialize(&self.choice, out);
@@ -228,13 +240,33 @@ impl PCFG for StmtPCFG {
 
     const COUNT: usize = Statement::COUNT;
 }
+
+impl StatementPCFG for StmtPCFG {
+    const COUNT: usize = Statement::COUNT;
+
+    fn get_choice(&self) -> &[f64] {
+        &self.choice
+    }
+
+    fn get_new_var(&self) -> f64 {
+        self.new_var
+    }
+
+    fn get_bool_type(&self) -> f64 {
+        self.var_type
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LoopStmtPCFG {
     pub choice: [f64; LoopStatement::COUNT],
+    pub new_var: f64,
+    pub var_type: f64,
 }
 
 impl PCFG for LoopStmtPCFG {
-    fn serialize(&self, out: Vec<PSpace>) -> Vec<PSpace> {
+    fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
+        out.push(PSpace(vec![self.var_type]));
+        out.push(PSpace(vec![self.new_var]));
         <[f64; LoopStatement::COUNT]>::serialize(&self.choice, out)
     }
 
@@ -242,8 +274,18 @@ impl PCFG for LoopStmtPCFG {
     where
         Self: Sized,
     {
-        let (choice, input) = <[f64; LoopStatement::COUNT]>::deserialize(input);
-        (Self { choice }, input)
+        let (choice, mut input) =
+            <[f64; LoopStatement::COUNT]>::deserialize(input);
+        let new_var = pop_singleton(&mut input);
+        let var_type = pop_singleton(&mut input);
+        (
+            Self {
+                choice,
+                new_var,
+                var_type,
+            },
+            input,
+        )
     }
 
     fn uniform() -> Self
@@ -252,10 +294,28 @@ impl PCFG for LoopStmtPCFG {
     {
         Self {
             choice: <[f64; LoopStatement::COUNT]>::uniform(),
+            new_var: 0.5_f64.ln(),
+            var_type: 0.5_f64.ln(),
         }
     }
 
-    const COUNT: usize = LoopStatement::COUNT;
+    const COUNT: usize = Statement::COUNT + LoopStatement::COUNT - 1;
+}
+
+impl StatementPCFG for LoopStmtPCFG {
+    const COUNT: usize = Statement::COUNT + LoopStatement::COUNT - 1;
+
+    fn get_choice(&self) -> &[f64] {
+        &self.choice
+    }
+
+    fn get_new_var(&self) -> f64 {
+        self.new_var
+    }
+
+    fn get_bool_type(&self) -> f64 {
+        self.var_type
+    }
 }
 
 /// PCFG for an if statement
@@ -298,6 +358,8 @@ impl<P: PCFG> PCFG for IfPCFG<P> {
 pub struct LoopPCFG {
     pub init: AExprPCFG,
     pub limit: AExprPCFG,
+    pub step: AExprPCFG,
+    pub inc_or_dec: f64,
 }
 
 impl PCFG for LoopPCFG {
@@ -306,18 +368,24 @@ impl PCFG for LoopPCFG {
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out = self.init.serialize(out);
         out = self.limit.serialize(out);
+        out = self.step.serialize(out);
+        out.push(PSpace(vec![self.inc_or_dec]));
         out
     }
 
-    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>)
     where
         Self: Sized,
     {
         let mut res = Self::default();
+        let inc_or_dec = pop_singleton(&mut input);
+        let (step, input) = AExprPCFG::deserialize(input);
         let (limit, input) = AExprPCFG::deserialize(input);
         let (init, input) = AExprPCFG::deserialize(input);
         res.limit = limit;
         res.init = init;
+        res.step = step;
+        res.inc_or_dec = inc_or_dec;
         (res, input)
     }
 
@@ -325,6 +393,8 @@ impl PCFG for LoopPCFG {
         Self {
             init: AExprPCFG::uniform(),
             limit: AExprPCFG::uniform(),
+            step: AExprPCFG::uniform(),
+            inc_or_dec: 0.5_f64.ln(),
         }
     }
 }

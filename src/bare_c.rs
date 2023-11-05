@@ -226,7 +226,7 @@ impl Pretty for Statement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Indexable)]
 pub enum LoopStatement {
     Stmt(Statement),
     /// A break statement with the number of loops to break out of
