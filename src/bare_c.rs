@@ -256,6 +256,18 @@ impl LoopStatement {
 pub type LoopBlock = Block<LoopStatement>;
 pub type StmtBlock = Block<Statement>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuffsInfo {
+    var: String,
+    init: AExpr,
+    limit: AExpr,
+    step: AExpr,
+    guard: AExpr,
+    bodies: Vec<(AExpr, Vec<LoopBlock>)>,
+    default: Vec<LoopBlock>,
+    is_inc: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, CountMacro, Eq, Indexable)]
 pub enum Block<T: Pretty> {
     If {
@@ -267,6 +279,8 @@ pub enum Block<T: Pretty> {
         var: String,
         limit: AExpr,
         body: Vec<LoopBlock>,
+        do_while: bool,
+        is_inc: bool,
     },
     For {
         var: String,
@@ -274,16 +288,9 @@ pub enum Block<T: Pretty> {
         limit: AExpr,
         step: AExpr,
         body: Vec<LoopBlock>,
+        is_inc: bool,
     },
-    MatchedFor {
-        var1: String,
-        var2: String,
-        init: AExpr,
-        limit: AExpr,
-        step: AExpr,
-        body1: Vec<LoopBlock>,
-        body2: Vec<LoopBlock>,
-    },
+    Duffs(DuffsInfo),
     Switch {
         guard: AExpr,
         cases: Vec<(AExpr, Vec<Self>)>,
@@ -297,6 +304,77 @@ pub enum Block<T: Pretty> {
     /// A block whose results are never used outside the block
     Dead(Vec<Self>),
     Stmt(T),
+}
+
+impl<T: Pretty> Block<T> {
+    fn print_while(
+        &self,
+        var: &str,
+        limit: &AExpr,
+        body: &[LoopBlock],
+        do_while: bool,
+        is_inc: bool,
+        indent: isize,
+    ) -> String {
+        let mut res = String::new();
+        let op = if is_inc { "<" } else { ">" };
+        if do_while {
+            res += &format!("{}do {{\n", self.indent(indent));
+            for stmt in body {
+                res += &format!("{}\n", stmt.pretty(indent + 1));
+            }
+            res += &format!(
+                "{}}} while {var} {op} {};\n",
+                self.indent(indent),
+                limit.pretty(indent)
+            );
+        } else {
+            res += &format!(
+                "{}while {var} {op} {} {{\n",
+                self.indent(indent),
+                limit.pretty(indent)
+            );
+            for stmt in body {
+                res += &format!("{}\n", stmt.pretty(indent + 1));
+            }
+            res += &format!("{}}}\n", self.indent(indent));
+        }
+        res
+    }
+
+    fn print_duffs(&self, df: &DuffsInfo, indent: isize) -> String {
+        let mut res = String::new();
+        let op = if df.is_inc { "<" } else { ">" };
+        res += &format!(
+            "{}switch {} {{\n",
+            self.indent(indent),
+            df.guard.pretty(indent)
+        );
+        res += &format!("{}do {{\n", self.indent(indent + 1));
+        for (case, body) in &df.bodies {
+            res += &format!(
+                "{}case {}:\n",
+                self.indent(indent + 1),
+                case.pretty(indent + 1)
+            );
+            for stmt in body {
+                res += &format!("{}\n", stmt.pretty(indent + 2));
+            }
+        }
+        res += &format!("{}default:\n", self.indent(indent + 1));
+        for stmt in &df.default {
+            res += &format!("{}\n", stmt.pretty(indent + 2));
+        }
+        res += &format!(
+            "{}}} for {} {op} {} by {};\n",
+            self.indent(indent + 1),
+            df.var,
+            df.limit.pretty(indent + 1),
+            df.step.pretty(indent + 1),
+        );
+        res += &format!("{}}}\n", self.indent(indent));
+        res
+    }
 }
 
 impl<T: Pretty> Pretty for Block<T> {
@@ -334,29 +412,26 @@ impl<T: Pretty> Pretty for Block<T> {
                 res += "}";
                 res
             }
-            Self::While { var, limit, body } => {
-                let mut res = String::new();
-                res += &self.indent(indent);
-                res +=
-                    &format!("while {} < {} {{\n", var, limit.pretty(indent));
-                for stmt in body {
-                    res += &format!("{}\n", stmt.pretty(indent + 1));
-                }
-                res += &self.indent(indent);
-                res += "}";
-                res
-            }
+            Self::While {
+                var,
+                limit,
+                body,
+                do_while,
+                is_inc,
+            } => self.print_while(var, limit, body, *do_while, *is_inc, indent),
             Self::For {
                 var,
                 init,
                 limit,
                 step,
                 body,
+                is_inc,
             } => {
                 let mut res = String::new();
+                let op = if *is_inc { "<" } else { ">" };
                 res += &self.indent(indent);
                 res += &format!(
-                    "for {} in {} .. {} by {} {{\n",
+                    "for {} in {} {op} {} by {} {{\n",
                     var,
                     init.pretty(indent),
                     limit.pretty(indent),
@@ -370,42 +445,7 @@ impl<T: Pretty> Pretty for Block<T> {
                 res
             }
             Self::Stmt(stmt) => stmt.pretty(indent),
-            Self::MatchedFor {
-                var1,
-                var2,
-                init,
-                limit,
-                step,
-                body1,
-                body2,
-            } => {
-                let mut res = String::new();
-                res += &self.indent(indent);
-                res += &format!(
-                    "for {} in {} .. {} by {} {{\n",
-                    var1,
-                    init.pretty(indent),
-                    limit.pretty(indent),
-                    step.pretty(indent)
-                );
-                for stmt in body1 {
-                    res += &format!("{}\n", stmt.pretty(indent + 1));
-                }
-                res += &format!("{}}}\n", self.indent(indent));
-                res += &format!(
-                    "for {} in {} .. {} by {} {{\n",
-                    var2,
-                    init.pretty(indent),
-                    limit.pretty(indent),
-                    step.pretty(indent),
-                );
-                for stmt in body2 {
-                    res += &format!("{}\n", stmt.pretty(indent + 1));
-                }
-                res += &self.indent(indent);
-                res += "}";
-                res
-            }
+            Self::Duffs(duffs_info) => self.print_duffs(duffs_info, indent),
             Self::TryCatch {
                 try_block,
                 catch_name,
@@ -436,7 +476,7 @@ impl<T: Pretty> Pretty for Block<T> {
             } => {
                 let mut res = String::new();
                 res += &self.indent(indent);
-                res += &format!("switch {} {{\n", guard.pretty(indent));
+                res += &format!("match {} {{\n", guard.pretty(indent));
                 for (guard, body) in cases {
                     res += &format!(
                         "{}{} => {{\n",

@@ -16,7 +16,7 @@ pub fn indexable_derive(input: TokenStream) -> TokenStream {
     if !ast.generics.params.is_empty() {
         generic_str += "<";
         generic_str2 += "<";
-        for (i, p) in ast.generics.params.iter().enumerate() {
+        for (i, _) in ast.generics.params.iter().enumerate() {
             if i != 0 {
                 generic_str += ", ";
                 generic_str2 += ", ";
@@ -62,14 +62,12 @@ pub fn array_pcfg(item: TokenStream) -> TokenStream {
 
             fn uniform() -> Self {
                 #[allow(clippy::cast_precision_loss)]
-                std::iter::repeat((1.0 / Self::COUNT as f64).ln())
-                    .take(Self::COUNT)
+                std::iter::repeat((1.0 / #len as f64).ln())
+                    .take(#len)
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap()
             }
-
-            const COUNT: usize = #len;
 
         }
     }

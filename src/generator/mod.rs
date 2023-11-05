@@ -10,7 +10,7 @@ mod control_flow;
 
 use crate::bare_c::{BExpr, Block, Expr, LoopStatement, Pretty, Statement};
 use crate::generator::context::FuncList;
-use crate::pcfg::{ExprPCFG, StatementPCFG, StmtPCFG};
+use crate::pcfg::{ExprPCFG, StatementPCFG};
 /// Overflow is not an error in BRIL, so we just don't worry about it.
 /// Furthermore, we use random probing for a few reasons:
 /// 1. We don't want small programs
@@ -541,7 +541,7 @@ fn gen_assign<P: StatementPCFG>(
     let expr = if typ == Type::Int {
         let (expr, expr_info) =
             gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
-        ctx.new_avar(&var, expr_info);
+        ctx.new_avar(&var, &expr_info);
         Expr::AExpr(expr)
     } else {
         let (expr, info) =
@@ -690,7 +690,7 @@ impl StatementTy for Statement {
     fn from(stmt: StatementEnum) -> Self {
         match stmt {
             StatementEnum::Statement(stmt) => stmt,
-            _ => unreachable!(),
+            StatementEnum::LoopStmt(..) => unreachable!(),
         }
     }
 }
@@ -707,9 +707,9 @@ impl StatementTy for LoopStatement {
 pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
     let mut funcs = FuncList::new();
     let mut ctx = Context::make_root();
-    ctx.new_avar("a", ExprInfo::from_interval(Interval::new(0, 100)));
-    ctx.new_avar("b", ExprInfo::from_interval(Interval::new(0, 100)));
-    ctx.new_avar("c", ExprInfo::from_interval(Interval::new(0, 100)));
+    ctx.new_avar("a", &ExprInfo::from_interval(Interval::new(0, 100)));
+    ctx.new_avar("b", &ExprInfo::from_interval(Interval::new(0, 100)));
+    ctx.new_avar("c", &ExprInfo::from_interval(Interval::new(0, 100)));
     ctx.new_bvar("d", vec![]);
     ctx.new_bvar("e", vec![]);
     control_flow::gen_blocks(

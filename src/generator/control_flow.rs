@@ -98,7 +98,7 @@ fn gen_try_catch<T: Pretty + StatementTy, P: StatementPCFG>(
     let mut catch_frame = ctx.child_frame();
     if catch_type == Type::Int {
         catch_frame
-            .new_avar(catch_name.as_ref().unwrap(), ExprInfo::make_unknown());
+            .new_avar(catch_name.as_ref().unwrap(), &ExprInfo::make_unknown());
     } else if catch_type == Type::Bool {
         catch_frame.new_bvar(catch_name.as_ref().unwrap(), vec![]);
     }
@@ -161,7 +161,7 @@ fn correct_loop_step(
         step = AExpr::Add(Box::new(step), Box::new(AExpr::Num(1)));
         step_info = step_info + ExprInfo::from_const(1);
     }
-    if step_ty == StepType::Inc && step_info.interval.lower_bound() < 0 {
+    if step_ty == StepType::Inc && step_info.interval.contains(0) {
         step = AExpr::Add(
             Box::new(step),
             Box::new(AExpr::Num(
@@ -172,7 +172,7 @@ fn correct_loop_step(
                     .saturating_add(1),
             )),
         );
-    } else if step_ty == StepType::Dec && step_info.interval.upper_bound() > 0 {
+    } else if step_ty == StepType::Dec && step_info.interval.contains(0) {
         step = AExpr::Sub(
             Box::new(step),
             Box::new(AExpr::Num(
@@ -241,11 +241,16 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> Block<T> {
-    // TODO: Step type
     let var = ctx.new_var();
-    let init =
-        gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, StepType::Inc);
-    let mut body_frame = ctx.loop_child_frame(StepType::Inc, 0.5);
+    let step_ty = if distribs.uniform.sample(&mut thread_rng())
+        < pcfg.loop_pcfg.inc_or_dec.exp()
+    {
+        StepType::Inc
+    } else {
+        StepType::Dec
+    };
+    let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
+    let mut body_frame = ctx.loop_child_frame(step_ty, 0.5);
     body_frame.pin_vars(&init.limit_info.vars);
     body_frame.pin_vars(&init.step_info.vars);
     let body = gen_blocks(
@@ -262,6 +267,7 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
         limit: init.limit,
         step: init.step,
         body,
+        is_inc: step_ty == StepType::Inc,
     }
 }
 

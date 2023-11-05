@@ -32,9 +32,6 @@ pub trait PCFG: Default {
     fn uniform() -> Self
     where
         Self: Sized;
-
-    /// How many floats are needed to serialize this PCFG
-    const COUNT: usize;
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -83,8 +80,6 @@ impl PCFG for AExprPCFG {
         }
         res
     }
-
-    const COUNT: usize = AExpr::COUNT + 1;
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -95,8 +90,6 @@ pub struct BExprPCFG {
 }
 
 impl PCFG for BExprPCFG {
-    const COUNT: usize = BExpr::COUNT + 2;
-
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out.push(PSpace(self.choice.to_vec()));
         out.push(PSpace(vec![self.boolean]));
@@ -148,7 +141,6 @@ pub struct ExprPCFG {
 }
 
 impl PCFG for ExprPCFG {
-    const COUNT: usize = AExprPCFG::COUNT + BExprPCFG::COUNT + 2;
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out = self.a_expr.serialize(out);
         out = self.b_expr.serialize(out);
@@ -237,8 +229,6 @@ impl PCFG for StmtPCFG {
             var_type: 0.5_f64.ln(),
         }
     }
-
-    const COUNT: usize = Statement::COUNT;
 }
 
 impl StatementPCFG for StmtPCFG {
@@ -298,12 +288,10 @@ impl PCFG for LoopStmtPCFG {
             var_type: 0.5_f64.ln(),
         }
     }
-
-    const COUNT: usize = Statement::COUNT + LoopStatement::COUNT - 1;
 }
 
 impl StatementPCFG for LoopStmtPCFG {
-    const COUNT: usize = Statement::COUNT + LoopStatement::COUNT - 1;
+    const COUNT: usize = LoopStatement::COUNT;
 
     fn get_choice(&self) -> &[f64] {
         &self.choice
@@ -326,8 +314,6 @@ pub struct IfPCFG<P: PCFG> {
 }
 
 impl<P: PCFG> PCFG for IfPCFG<P> {
-    const COUNT: usize = BExprPCFG::COUNT + P::COUNT * 2;
-
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out = self.guard.serialize(out);
         self.child.serialize(out)
@@ -363,8 +349,6 @@ pub struct LoopPCFG {
 }
 
 impl PCFG for LoopPCFG {
-    const COUNT: usize = ExprPCFG::COUNT * 3;
-
     fn serialize(&self, mut out: Vec<PSpace>) -> Vec<PSpace> {
         out = self.init.serialize(out);
         out = self.limit.serialize(out);
@@ -408,6 +392,7 @@ pub struct BlockPCFG<T: PCFG> {
     pub seq: f64,
     pub case_seq: f64,
     pub case_try_type: TypeChoice,
+    pub step_ty: f64,
 }
 
 impl<T: PCFG> PCFG for BlockPCFG<T> {
@@ -419,14 +404,16 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
         out.push(PSpace(vec![self.seq]));
         out.push(PSpace(vec![self.case_seq]));
         out = self.case_try_type.serialize(out);
+        out.push(PSpace(vec![self.step_ty]));
         out
     }
 
-    fn deserialize(input: Vec<PSpace>) -> (Self, Vec<PSpace>)
+    fn deserialize(mut input: Vec<PSpace>) -> (Self, Vec<PSpace>)
     where
         Self: Sized,
     {
         let mut res = Self::default();
+        let step_ty = pop_singleton(&mut input);
         let (case_try_type, mut input) = TypeChoice::deserialize(input);
         let case_seq = pop_singleton(&mut input);
         let seq = pop_singleton(&mut input);
@@ -441,6 +428,7 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
         res.if_pcfg = if_pcfg;
         res.choice = choice;
         res.case_try_type = case_try_type;
+        res.step_ty = step_ty;
         (res, input)
     }
 
@@ -456,13 +444,9 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
             seq: 0.5_f64.ln(),
             case_seq: 0.5_f64.ln(),
             case_try_type: TypeChoice::uniform(),
+            step_ty: 0.5_f64.ln(),
         }
     }
-
-    const COUNT: usize = StmtBlock::COUNT
-        + IfPCFG::<[f64; StmtBlock::COUNT]>::COUNT
-        + LoopPCFG::COUNT
-        + 1;
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -511,12 +495,6 @@ impl PCFG for TopPCFG {
             expr: ExprPCFG::uniform(),
         }
     }
-
-    const COUNT: usize = BlockPCFG::<StmtPCFG>::COUNT
-        + BlockPCFG::<LoopStmtPCFG>::COUNT
-        + ExprPCFG::COUNT
-        + FnPCFG::COUNT
-        + 3;
 }
 
 /// Probability of a function call
@@ -555,8 +533,6 @@ impl PCFG for FnPCFG {
         }
         res
     }
-
-    const COUNT: usize = 6;
 }
 
 support::array_pcfg!([f64; Statement::COUNT]);

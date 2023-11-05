@@ -335,7 +335,7 @@ impl<'a> Context<'a> {
         self.cur.facts.available_bexprs.insert(expr, vars);
     }
 
-    pub(super) fn new_avar(&mut self, name: &str, info: ExprInfo) {
+    pub(super) fn new_avar(&mut self, name: &str, info: &ExprInfo) {
         self.cur.facts.avars.insert(name.to_string(), info.interval);
     }
 
