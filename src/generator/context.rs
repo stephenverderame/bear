@@ -90,7 +90,7 @@ pub(super) struct StackFrame {
 /// to generate.
 #[derive(Clone, Debug, Default)]
 pub(super) struct StackLevel {
-    nested_loops: usize,
+    nested_loops: Vec<String>,
     nested_trys: Vec<Type>,
 }
 
@@ -127,7 +127,13 @@ impl StackFrame {
         c
     }
 
-    fn loop_child(&self, step: StepType, pin_prob: f64) -> Self {
+    fn loop_child(
+        &self,
+        step: StepType,
+        pin_prob: f64,
+        loop_var: &str,
+        need_step: bool,
+    ) -> Self {
         let mut c = self.new_child();
         for nm in self
             .facts
@@ -142,8 +148,8 @@ impl StackFrame {
                 break;
             }
         }
-        c.nests.nested_loops += 1;
-        c.pending_step = step;
+        c.nests.nested_loops.push(loop_var.to_string());
+        c.pending_step = if need_step { step } else { StepType::None };
         c
     }
 
@@ -273,7 +279,7 @@ impl<'a> Context<'a> {
     /// Gets the context right before a loop in the stack frame
     /// This may be the context before the nearest loop, or a parent loop
     pub fn loop_inv(&'a self) -> Context<'a> {
-        if self.cur.nests.nested_loops == 0 {
+        if self.cur.nests.nested_loops.is_empty() {
             self.child_frame()
         } else {
             Self {
@@ -300,9 +306,21 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn loop_child_frame(&'a self, step: StepType, pin_prob: f64) -> Self {
+    /// Constructs a new context for loops that is a child of the current context
+    /// # Arguments
+    /// * `step` - Whether the loop counter must increment or decrement
+    /// * `pin_prob` - The log probability that a variable will be pinned (made loop invariant)
+    /// * `loop_var` - The name of the loop variable
+    /// * `need_step` - Whether the loop counter needs to be stepped by the child
+    pub fn loop_child_frame(
+        &'a self,
+        step: StepType,
+        pin_prob: f64,
+        loop_var: &str,
+        need_step: bool,
+    ) -> Self {
         Self {
-            cur: self.cur.loop_child(step, pin_prob),
+            cur: self.cur.loop_child(step, pin_prob, loop_var, need_step),
             parent: Some(self),
         }
     }
@@ -409,8 +427,8 @@ impl<'a> Context<'a> {
     }
 
     /// Returns the current loop depth
-    pub(super) const fn loop_depth(&self) -> usize {
-        self.cur.nests.nested_loops
+    pub(super) fn loop_depth(&self) -> usize {
+        self.cur.nests.nested_loops.len()
     }
 
     /// Sets the specified variables as pinned (loop invariant)
@@ -445,15 +463,18 @@ impl<'a> Context<'a> {
     pub(super) fn set_return(&mut self) {
         self.cur.pending_ret = false;
         self.cur.can_follow = false;
+        self.cur.pending_step = StepType::None;
     }
 
     /// Indicates the current context throws an exception
     pub(super) fn set_throw(&mut self) {
         self.cur.can_follow = false;
+        self.cur.pending_step = StepType::None;
     }
 
     pub(super) fn set_loop_exit(&mut self) {
         self.cur.can_follow = false;
+        self.cur.pending_step = StepType::None;
     }
 
     pub(super) const fn is_dead(&self) -> bool {
@@ -474,5 +495,34 @@ impl<'a> Context<'a> {
             cur: self.cur.try_child(t),
             parent: Some(self),
         }
+    }
+
+    pub(super) fn get_rand_loop_var(&self) -> Option<String> {
+        use rand::seq::SliceRandom;
+        self.cur
+            .nests
+            .nested_loops
+            .iter()
+            .filter(|&x| self.cur.facts.avars.contains_key(x))
+            .cloned()
+            .collect::<Vec<_>>()
+            .choose(&mut rand::thread_rng())
+            .cloned()
+    }
+
+    pub(super) fn get_avar_interval(&self, var: &str) -> Option<Interval> {
+        self.cur.facts.avars.get(var).copied()
+    }
+
+    pub(super) const fn get_pending_step(&self) -> StepType {
+        self.cur.pending_step
+    }
+
+    pub(super) fn get_nearest_loop_var(&self) -> Option<String> {
+        self.cur.nests.nested_loops.last().cloned()
+    }
+
+    pub(super) fn set_step(&mut self) {
+        self.cur.pending_step = StepType::None;
     }
 }

@@ -25,7 +25,7 @@ use crate::{
 use self::context::Context;
 
 const EXPR_FUEL: usize = 5;
-const STMT_FUEL: usize = 6;
+const STMT_FUEL: usize = 4;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
 enum Type {
@@ -217,7 +217,6 @@ fn gen_div(
 struct Distribs {
     aexpr_idx: WeightedIndex<f64>,
     bexpr_idx: WeightedIndex<f64>,
-    stmt_idx: WeightedIndex<f64>,
     block_idx: WeightedIndex<f64>,
     uniform: Uniform<f64>,
     type_idx: WeightedIndex<f64>,
@@ -233,10 +232,6 @@ impl Distribs {
             aexpr_idx: index,
             bexpr_idx: WeightedIndex::new(
                 pcfg.expr.b_expr.choice.iter().map(|x| x.exp()),
-            )
-            .unwrap(),
-            stmt_idx: WeightedIndex::new(
-                pcfg.block.stmt.choice.iter().map(|x| x.exp()),
             )
             .unwrap(),
             block_idx: WeightedIndex::new(
@@ -274,6 +269,7 @@ fn get_redundant_expr(
                 (x, x_info)
             }
         })
+        .map(|(expr, info)| (AExpr::Redundant(Box::new(expr)), info))
         .unwrap_or_else(|| gen_aexpr(pcfg, ctx, distrib, funcs, fuel - 1))
 }
 
@@ -284,8 +280,10 @@ fn get_redundant_bexpr(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> (BExpr, Vec<String>) {
-    get_rand_prev_bexpr(ctx)
-        .unwrap_or_else(|| gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1))
+    get_rand_prev_bexpr(ctx).map_or_else(
+        || gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1),
+        |(expr, info)| (BExpr::Redundant(Box::new(expr)), info),
+    )
 }
 
 /// Generates an arithmetic binary operation (except division)
@@ -313,6 +311,50 @@ fn gen_abop(
             lhs_info * rhs_info,
         ),
         _ => unreachable!(),
+    }
+}
+
+fn gen_derived_iv(
+    pcfg: &AExprPCFG,
+    ctx: &mut Context,
+    distrib: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> (AExpr, ExprInfo) {
+    if let Some(basic) = ctx.get_rand_loop_var() {
+        let (fact, fact_info) =
+            gen_aexpr(pcfg, &mut ctx.loop_inv(), distrib, funcs, fuel);
+        let lhs =
+            AExpr::Mul(Box::new(fact), Box::new(AExpr::Id(basic.clone())));
+        let basic_info = ctx.get_avar_interval(&basic).unwrap();
+        let lhs_info = fact_info * ExprInfo::from_interval(basic_info);
+        let (addend, addend_info) =
+            gen_aexpr(pcfg, &mut ctx.loop_inv(), distrib, funcs, fuel);
+        (
+            AExpr::Derived(Box::new(AExpr::Add(
+                Box::new(AExpr::Mul(Box::new(AExpr::Id(basic)), Box::new(lhs))),
+                Box::new(addend),
+            ))),
+            lhs_info + addend_info,
+        )
+    } else {
+        gen_aexpr(pcfg, ctx, distrib, funcs, fuel)
+    }
+}
+
+fn gen_loop_inv_aexpr(
+    pcfg: &AExprPCFG,
+    ctx: &mut Context,
+    distrib: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> (AExpr, ExprInfo) {
+    if ctx.loop_depth() == 0 {
+        gen_aexpr(pcfg, ctx, distrib, funcs, fuel - 1)
+    } else {
+        let (res, info) =
+            gen_aexpr(pcfg, &mut ctx.loop_inv(), distrib, funcs, fuel - 1);
+        (AExpr::LoopInvariant(Box::new(res)), info)
     }
 }
 
@@ -364,9 +406,11 @@ fn gen_aexpr(
         // can't use unwrap_or bc we need to borrow ctx mutably
         // and thus can't have the lifetimes overlap
         AExpr::LOOPINVARIANT_IDX => {
-            gen_aexpr(pcfg, &mut ctx.loop_inv(), distrib, funcs, fuel - 1)
+            gen_loop_inv_aexpr(pcfg, ctx, distrib, funcs, fuel)
         }
-        AExpr::DERIVED_IDX => gen_aexpr(pcfg, ctx, distrib, funcs, fuel - 1), // TODO Derived
+        AExpr::DERIVED_IDX => {
+            gen_derived_iv(pcfg, ctx, distrib, funcs, fuel - 1)
+        }
         _ => unreachable!(),
     };
     if !is_redundant
@@ -449,6 +493,22 @@ fn gen_cmp_bexpr(
     }
 }
 
+fn gen_loop_inv_bexpr(
+    pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distrib: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> (BExpr, Vec<String>) {
+    if ctx.loop_depth() == 0 {
+        gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1)
+    } else {
+        let (res, info) =
+            gen_bexpr(pcfg, &mut ctx.loop_inv(), distrib, funcs, fuel - 1);
+        (BExpr::LoopInvariant(Box::new(res)), info)
+    }
+}
+
 /// Generates an expression which results in a boolean
 /// # Arguments
 /// * `pcfg` - The PCFG to use
@@ -496,9 +556,9 @@ fn gen_bexpr(
             .unwrap_or_else(|| gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1)),
         BExpr::FCALL_IDX => gen_bexpr(pcfg, ctx, distrib, funcs, fuel - 1), // TODO FCall
         BExpr::LOOPINVARIANT_IDX => {
-            let mut li_frame = ctx.loop_inv();
-            gen_bexpr(pcfg, &mut li_frame, distrib, funcs, fuel - 1)
+            gen_loop_inv_bexpr(pcfg, ctx, distrib, funcs, fuel)
         }
+
         x => unreachable!("Invalid index: {}", x),
     };
     if !is_redundant
@@ -603,20 +663,61 @@ pub trait StatementTy {
         Self: Sized;
 }
 
-fn gen_loop_stmt(ctx: &mut Context, x: usize) -> StatementEnum {
+fn gen_loop_stmt(
+    ctx: &mut Context,
+    x: usize,
+    expr_pcfg: &AExprPCFG,
+    distrib: &mut Distribs,
+    funcs: &mut FuncList,
+) -> Option<StatementEnum> {
     // loop statements start indexing after the normal statements
+    let cont_id = LoopStatement::CONTINUE_IDX - 1 + Statement::COUNT;
+    let step_id = LoopStatement::STEP_IDX - 1 + Statement::COUNT;
     match x {
         x if x == LoopStatement::BREAK_IDX - 1 + Statement::COUNT => {
             ctx.set_loop_exit();
-            StatementEnum::LoopStmt(LoopStatement::Break(
+            Some(StatementEnum::LoopStmt(LoopStatement::Break(
                 Uniform::new(0, ctx.loop_depth()).sample(&mut thread_rng()),
-            ))
+            )))
         }
-        x if x == LoopStatement::CONTINUE_IDX - 1 + Statement::COUNT => {
+        x if x == cont_id && ctx.get_pending_step() == StepType::None => {
             ctx.set_loop_exit();
-            StatementEnum::LoopStmt(LoopStatement::Continue(
+            Some(StatementEnum::LoopStmt(LoopStatement::Continue(
                 Uniform::new(0, ctx.loop_depth()).sample(&mut thread_rng()),
-            ))
+            )))
+        }
+        x if x == step_id
+            || x == cont_id && ctx.get_pending_step() != StepType::None =>
+        {
+            let step_ty = ctx.get_pending_step();
+            if step_ty == StepType::None {
+                None
+            } else {
+                ctx.set_step();
+                let (step_expr, step_info) = gen_aexpr(
+                    expr_pcfg,
+                    &mut ctx.loop_inv(),
+                    distrib,
+                    funcs,
+                    3,
+                );
+                let (step, _) = control_flow::correct_loop_step(
+                    step_ty, step_expr, step_info,
+                );
+                let loop_var = ctx.get_nearest_loop_var().unwrap();
+                // don't update the loop variable range
+                // this is correct, just not as precise as it could be
+                ctx.kill_available_exprs(&loop_var, Type::Int);
+                Some(StatementEnum::LoopStmt(LoopStatement::Step(
+                    Statement::Assign {
+                        dest: loop_var.clone(),
+                        src: Expr::AExpr(AExpr::Add(
+                            Box::new(AExpr::Id(loop_var)),
+                            Box::new(step),
+                        )),
+                    },
+                )))
+            }
         }
         _ => unreachable!(),
     }
@@ -682,7 +783,10 @@ fn gen_stmt<P: StatementPCFG>(
         Statement::PCALL_IDX => {
             gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
         }
-        x => gen_loop_stmt(ctx, x),
+        x => gen_loop_stmt(ctx, x, &expr_pcfg.a_expr, distribs, funcs)
+            .unwrap_or_else(|| {
+                gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
+            }),
     }
 }
 
@@ -729,4 +833,19 @@ pub fn display(program: &[Block<Statement>]) -> String {
         res += "\n";
     }
     res
+}
+
+#[cfg(test)]
+mod test {
+    use crate::pcfg::PCFG;
+
+    use super::gen_program;
+
+    #[test]
+    fn running_test() {
+        let pcfg = crate::pcfg::TopPCFG::uniform();
+        for _ in 0..30 {
+            gen_program(&pcfg);
+        }
+    }
 }

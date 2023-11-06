@@ -66,6 +66,13 @@ impl Interval {
             max: self.max.max(other.max),
         }
     }
+
+    pub const fn len(&self) -> i64 {
+        self.max
+            .saturating_add(1)
+            .saturating_sub(self.min)
+            .saturating_abs()
+    }
 }
 
 impl std::ops::Add<Self> for Interval {

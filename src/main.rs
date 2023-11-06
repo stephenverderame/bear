@@ -10,9 +10,8 @@ mod generator;
 
 fn main() {
     let pcfg = pcfg::TopPCFG::uniform();
-    for _ in 0..20 {
+    for _ in 0..1 {
         println!("{}", generator::display(&generator::gen_program(&pcfg)));
-        println!();
-        println!();
+        println!("DONE");
     }
 }

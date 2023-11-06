@@ -537,7 +537,7 @@ impl PCFG for FnPCFG {
 
 support::array_pcfg!([f64; Statement::COUNT]);
 support::array_pcfg!([f64; LoopStatement::COUNT]);
-support::array_pcfg!([f64; StmtBlock::COUNT]);
+// support::array_pcfg!([f64; StmtBlock::COUNT]);
 support::array_pcfg!([f64; NUM_TYPES]);
 
 #[cfg(test)]

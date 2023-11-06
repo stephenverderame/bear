@@ -80,8 +80,11 @@ impl Pretty for BExpr {
                 res += ")";
                 res
             }
-            Self::Redundant(expr) | Self::LoopInvariant(expr) => {
-                expr.pretty(indent)
+            Self::Redundant(expr) => {
+                format!("(r {{ {} }})", expr.pretty(indent))
+            }
+            Self::LoopInvariant(expr) => {
+                format!("(liv {{ {} }})", expr.pretty(indent))
             }
         }
     }
@@ -111,11 +114,7 @@ pub enum AExpr {
     FCall(String, Vec<Expr>),
     Redundant(Box<AExpr>),
     LoopInvariant(Box<AExpr>),
-    Derived {
-        basic: String,
-        factor: Box<AExpr>,
-        offset: Box<AExpr>,
-    },
+    Derived(Box<AExpr>),
 }
 
 impl Pretty for AExpr {
@@ -143,19 +142,14 @@ impl Pretty for AExpr {
                 res += ")";
                 res
             }
-            Self::Redundant(expr) | Self::LoopInvariant(expr) => {
-                expr.pretty(indent)
+            Self::Redundant(expr) => {
+                format!("(r {{ {} }})", expr.pretty(indent))
             }
-            Self::Derived {
-                basic,
-                factor,
-                offset,
-            } => {
-                format!(
-                    "(+ (* {basic} {}) {})",
-                    factor.pretty(indent),
-                    offset.pretty(indent)
-                )
+            Self::LoopInvariant(expr) => {
+                format!("(liv {{ {} }})", expr.pretty(indent))
+            }
+            Self::Derived(expr) => {
+                format!("(iv {{ {} }})", expr.pretty(indent))
             }
         }
     }
@@ -233,12 +227,14 @@ pub enum LoopStatement {
     Break(usize),
     /// A continue statement with the number of nested loops to continue to
     Continue(usize),
+    /// Stepping of the loop variable
+    Step(Statement),
 }
 
 impl Pretty for LoopStatement {
     fn pretty(&self, indent: isize) -> String {
         match self {
-            Self::Stmt(stmt) => stmt.pretty(indent),
+            Self::Stmt(stmt) | Self::Step(stmt) => stmt.pretty(indent),
             Self::Break(n) => {
                 format!("{}break({});", self.indent(indent), n)
             }
@@ -250,7 +246,7 @@ impl Pretty for LoopStatement {
 }
 
 impl LoopStatement {
-    pub const COUNT: usize = Statement::COUNT + 2;
+    pub const COUNT: usize = Statement::COUNT + 3;
 }
 
 pub type LoopBlock = Block<LoopStatement>;
@@ -258,14 +254,14 @@ pub type StmtBlock = Block<Statement>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuffsInfo {
-    var: String,
-    init: AExpr,
-    limit: AExpr,
-    step: AExpr,
-    guard: AExpr,
-    bodies: Vec<(AExpr, Vec<LoopBlock>)>,
-    default: Vec<LoopBlock>,
-    is_inc: bool,
+    pub(super) var: String,
+    pub(super) init: AExpr,
+    pub(super) limit: AExpr,
+    pub(super) step: AExpr,
+    pub(super) guard: AExpr,
+    pub(super) bodies: Vec<(AExpr, Vec<LoopBlock>)>,
+    pub(super) default: Vec<LoopBlock>,
+    pub(super) is_inc: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, CountMacro, Eq, Indexable)]
