@@ -7,6 +7,7 @@ use super::{ExprInfo, StepType, Type};
 use crate::bare_c::{AExpr, BExpr, StmtBlock};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::slice::Chunks;
 
 /// Dataflow analysis facts for a dataflow analysis that is computed as
 /// we are generating the program
@@ -60,6 +61,35 @@ impl AnalysisFacts {
             available_aexprs,
             available_bexprs,
             pinned: loop_invariant,
+        }
+    }
+
+    /// Updates the analysis facts of a parent context with the analysis facts
+    /// of an only child context
+    pub fn update_from_child(&mut self, child: &Self) {
+        // update intervals
+        for (k, v) in &mut self.avars {
+            if let Some(v2) = child.avars.get(k) {
+                *v = v.union(*v2);
+            }
+        }
+        let mut to_remove = Vec::new();
+        for k in self.available_aexprs.keys() {
+            if !child.available_aexprs.contains_key(k) {
+                to_remove.push(k.clone());
+            }
+        }
+        for k in to_remove {
+            self.available_aexprs.remove(&k);
+        }
+        let mut to_remove = Vec::new();
+        for k in self.available_bexprs.keys() {
+            if !child.available_bexprs.contains_key(k) {
+                to_remove.push(k.clone());
+            }
+        }
+        for k in to_remove {
+            self.available_bexprs.remove(&k);
         }
     }
 }
@@ -195,6 +225,21 @@ impl StackFrame {
             can_follow: self.can_follow || other.can_follow,
             is_dead: self.is_dead && other.is_dead,
         }
+    }
+
+    /// Updates the current stack frame from the frame of a child stack frame
+    /// that will always run (ex. do while loop)
+    pub(super) fn update_from_always_running_child(&mut self, child: &Self) {
+        self.facts.update_from_child(&child.facts);
+        self.is_dead = self.is_dead || child.is_dead;
+        self.pending_ret = self.pending_ret && child.pending_ret;
+        self.can_follow = self.can_follow && child.pending_ret;
+    }
+
+    /// Updates the current stack frame from the frame of a child stack frame
+    /// that may not run (ex. while loop)
+    pub(super) fn update_from_child(&mut self, child: &Self) {
+        self.facts.update_from_child(&child.facts);
     }
 }
 
@@ -448,6 +493,8 @@ impl<'a> Context<'a> {
     }
 
     /// Updates the current context with a new current stack frame
+    /// Requires that `other` is the result of a child that is not
+    /// a loop
     /// # Arguments
     /// * `other` - The new bottom of the stack frame
     pub(super) fn update(&mut self, mut other: StackFrame) {
@@ -455,6 +502,26 @@ impl<'a> Context<'a> {
         self.cur = other;
     }
 
+    /// Updates the current context with information from a child
+    /// which may or may not run
+    ///
+    /// The key different between this and `update` is that
+    /// this function ignores the child's `pending_step`, `pending_ret`,
+    /// and `can_follow` fields
+    pub(super) fn update_from_loop(&mut self, child: &StackFrame) {
+        self.cur.update_from_child(child);
+    }
+
+    /// Updates the current context with information from a child
+    /// which will always run
+    ///
+    /// The key different between this and `update` is that
+    /// this function ignores the child's `pending_step` fields
+    pub(super) fn update_from_do_while_loop(&mut self, child: &StackFrame) {
+        self.cur.update_from_always_running_child(child);
+    }
+
+    /// Returns whether the current context can follow the current path
     pub(super) const fn can_follow(&self) -> bool {
         self.cur.can_follow
     }

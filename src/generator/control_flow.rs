@@ -3,12 +3,12 @@ use rand::{
 };
 
 use crate::{
-    bare_c::{AExpr, Block, DuffsInfo, Pretty, Statement},
+    bare_c::{AExpr, Block, DuffsInfo, LoopStatement, Pretty, Statement},
     pcfg::{BlockPCFG, LoopPCFG, StatementPCFG, TopPCFG},
 };
 
 use super::{
-    context::{Context, FuncList},
+    context::{Context, FuncList, StackFrame},
     gen_aexpr, gen_bexpr, gen_stmt,
     interval::Interval,
     Distribs, ExprInfo, StatementTy, StepType, Type, EXPR_FUEL,
@@ -74,6 +74,7 @@ fn gen_switch<T: Pretty + StatementTy, P: StatementPCFG>(
         sf = Context::meet_sf(sf, fr);
         new_cases.push((case, case_block));
     }
+    ctx.update(sf);
     Block::Switch {
         guard: switch,
         cases: new_cases,
@@ -341,6 +342,7 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
     body_frame.new_avar(&var, &ExprInfo::from_interval(init.iter_range));
     body_frame.pin_vars(&init.limit_info.vars);
     body_frame.pin_vars(&init.step_info.vars);
+    body_frame.pin_vars(&[var.clone()]);
     let body = gen_blocks(
         &tp.loop_block,
         tp,
@@ -349,6 +351,7 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
         funcs,
         fuel - 1,
     );
+    ctx.update_from_loop(&body_frame.stack_frame());
     Block::For {
         var,
         init: init.init,
@@ -476,6 +479,27 @@ fn gen_while_limit<P: StatementPCFG>(
     )
 }
 
+fn gen_while_body(
+    tp: &TopPCFG,
+    body_frame: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+) -> Vec<Block<LoopStatement>> {
+    let mut body = vec![];
+    while body_frame.get_pending_step() != StepType::None {
+        body.extend(gen_blocks(
+            &tp.loop_block,
+            tp,
+            body_frame,
+            distribs,
+            funcs,
+            fuel - 1,
+        ));
+    }
+    body
+}
+
 fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     pcfg: &BlockPCFG<P>,
     tp: &TopPCFG,
@@ -503,23 +527,19 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     let init_info = ExprInfo::from_interval(var_interval);
     let (limit, limit_info) =
         gen_while_limit(pcfg, ctx, distribs, funcs, step_ty, &init_info);
-    ctx.pin_vars(&limit_info.vars);
-    ctx.pin_vars(&[var.clone()]);
-    if !do_while {
-        ctx.new_avar(&var, &ExprInfo::from_interval(var_interval));
-    }
     let mut body_frame =
         ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, true);
-    let mut body = vec![];
-    while body_frame.get_pending_step() != StepType::None {
-        body.extend(gen_blocks(
-            &tp.loop_block,
-            tp,
-            &mut body_frame,
-            distribs,
-            funcs,
-            fuel - 1,
-        ));
+    body_frame.pin_vars(&limit_info.vars);
+    body_frame.pin_vars(&[var.clone()]);
+    if !do_while {
+        body_frame.new_avar(&var, &ExprInfo::from_interval(var_interval));
+    }
+    let body = gen_while_body(tp, &mut body_frame, distribs, funcs, fuel - 1);
+    let sf = body_frame.stack_frame();
+    if do_while {
+        ctx.update_from_do_while_loop(&sf);
+    } else {
+        ctx.update_from_loop(&sf);
     }
     init_block
         .into_iter()
@@ -549,6 +569,41 @@ fn gen_switch_guard(
     (switch, sw_info)
 }
 
+/// Generates the default case for a duff's device
+/// and updates the context with the information from the
+/// child frames of each case
+#[allow(clippy::too_many_arguments)]
+fn gen_duffs_default_and_update_ctx<
+    T: Pretty + StatementTy,
+    P: StatementPCFG,
+>(
+    pcfg: &BlockPCFG<P>,
+    tp: &TopPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+    fuel: usize,
+    step_ty: StepType,
+    var: &str,
+    init: &LoopInit,
+    sw_info: &ExprInfo,
+    frames: Vec<StackFrame>,
+) -> Vec<Block<T>> {
+    let mut default_frame =
+        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), var, false);
+    default_frame.pin_vars(&init.limit_info.vars);
+    default_frame.pin_vars(&[var.to_string()]);
+    default_frame.pin_vars(&sw_info.vars);
+    let default =
+        gen_blocks(pcfg, tp, &mut default_frame, distribs, funcs, fuel - 1);
+    let mut sf = default_frame.stack_frame();
+    for frame in frames {
+        sf = sf.meet(frame);
+    }
+    ctx.update_from_do_while_loop(&sf);
+    default
+}
+
 fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     pcfg: &BlockPCFG<P>,
     tp: &TopPCFG,
@@ -566,16 +621,17 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     };
     let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
     let var = ctx.new_var();
-    ctx.pin_vars(&init.limit_info.vars);
-    ctx.pin_vars(&[var.clone()]);
     let (switch, sw_info) = gen_switch_guard(tp, ctx, distribs, funcs);
-    ctx.pin_vars(&sw_info.vars);
     let mut bodies = vec![];
+    let mut frames = vec![];
     while (bodies.len() < 2 && sw_info.interval.len() > 3)
         || distribs.uniform.sample(&mut thread_rng()) < pcfg.case_seq.exp()
     {
         let mut body_frame =
             ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, false);
+        body_frame.pin_vars(&init.limit_info.vars);
+        body_frame.pin_vars(&[var.clone()]);
+        body_frame.pin_vars(&sw_info.vars);
         let body =
             gen_blocks(pcfg, tp, &mut body_frame, distribs, funcs, fuel - 1);
         let case = AExpr::Num(
@@ -585,7 +641,12 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
             .sample(&mut thread_rng()),
         );
         bodies.push((case, body));
+        frames.push(body_frame.stack_frame());
     }
+    let default = gen_duffs_default_and_update_ctx(
+        pcfg, tp, ctx, distribs, funcs, fuel, step_ty, &var, &init, &sw_info,
+        frames,
+    );
     Block::Duffs(DuffsInfo {
         var,
         limit: init.limit,
@@ -594,7 +655,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
         bodies,
         is_inc: step_ty == StepType::Inc,
         guard: switch,
-        default: gen_blocks(pcfg, tp, ctx, distribs, funcs, fuel),
+        default,
     })
 }
 
