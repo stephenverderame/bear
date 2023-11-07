@@ -168,15 +168,29 @@ pub(super) fn correct_loop_step(
 ) -> (AExpr, ExprInfo) {
     if step_ty == StepType::Inc && step_info.interval.contains(0) {
         let lower_bound = step_info.interval.lower_bound();
-        let addend = lower_bound.saturating_abs().saturating_add(1);
-        step = AExpr::Add(Box::new(step), Box::new(AExpr::Num(addend)));
-        step_info.interval = step_info.interval + Interval::from_const(addend);
+        let addend = lower_bound.saturating_abs();
+        let inc = if -addend == lower_bound { 1 } else { 2 };
+        step = AExpr::Add(
+            Box::new(AExpr::Add(Box::new(step), Box::new(AExpr::Num(addend)))),
+            Box::new(AExpr::Num(inc)),
+        );
+        step_info.interval = step_info.interval
+            + Interval::from_const(addend)
+            + Interval::from_const(inc);
     } else if step_ty == StepType::Dec && step_info.interval.contains(0) {
         let upper_bound = step_info.interval.upper_bound();
-        let subtractend = upper_bound.saturating_abs().saturating_add(1);
-        step = AExpr::Sub(Box::new(step), Box::new(AExpr::Num(subtractend)));
-        step_info.interval =
-            step_info.interval - Interval::from_const(subtractend);
+        let subtractend = upper_bound.saturating_abs();
+        let inc = if -subtractend == upper_bound { 1 } else { 2 };
+        step = AExpr::Sub(
+            Box::new(AExpr::Sub(
+                Box::new(step),
+                Box::new(AExpr::Num(subtractend)),
+            )),
+            Box::new(AExpr::Num(inc)),
+        );
+        step_info.interval = step_info.interval
+            - Interval::from_const(subtractend)
+            - Interval::from_const(inc);
     }
     (step, step_info)
 }
@@ -223,7 +237,7 @@ fn correct_loop_limit(
 }
 
 /// Gets the range an iterator could take on in a loop body.
-fn gen_iterator_range(
+fn get_iterator_range(
     step_ty: StepType,
     init_info: &ExprInfo,
     limit_info: &ExprInfo,
@@ -249,23 +263,24 @@ fn is_invalid_loop_bounds(
     step_info: &ExprInfo,
     step_ty: StepType,
 ) -> bool {
-    step_info.interval.lower_bound() == 0
-        || (step_ty == StepType::Inc
-            && limit_info
+    (step_ty == StepType::Inc
+        && (step_info.interval.lower_bound() == 0
+            || limit_info
                 .interval
                 .upper_bound()
                 .saturating_sub(init_info.interval.lower_bound())
                 .saturating_div(step_info.interval.lower_bound())
                 .abs()
-                > LOOP_MAX_ITER)
+                > LOOP_MAX_ITER))
         || (step_ty == StepType::Dec
-            && init_info
-                .interval
-                .upper_bound()
-                .saturating_sub(limit_info.interval.lower_bound())
-                .saturating_div(step_info.interval.lower_bound())
-                .abs()
-                > LOOP_MAX_ITER)
+            && (step_info.interval.upper_bound() == 0
+                || init_info
+                    .interval
+                    .upper_bound()
+                    .saturating_sub(limit_info.interval.lower_bound())
+                    .saturating_div(step_info.interval.upper_bound())
+                    .abs()
+                    > LOOP_MAX_ITER))
 }
 
 /// Generates the loop initializer, limiter, and step
@@ -278,7 +293,7 @@ fn gen_loop_init(
 ) -> LoopInit {
     const LOOP_EXPR_FUEL: usize = 4;
     const LOOP_STEP_FUEL: usize = 2;
-    let (init, init_info) =
+    let (mut init, mut init_info) =
         gen_aexpr(&loop_pcfg.init, ctx, distribs, funcs, LOOP_EXPR_FUEL);
     let (mut limit, mut limit_info) =
         gen_aexpr(&loop_pcfg.limit, ctx, distribs, funcs, LOOP_EXPR_FUEL);
@@ -291,6 +306,8 @@ fn gen_loop_init(
     while tries < 3
         && is_invalid_loop_bounds(&limit_info, &init_info, &step_info, step_ty)
     {
+        (init, init_info) =
+            gen_aexpr(&loop_pcfg.init, ctx, distribs, funcs, LOOP_EXPR_FUEL);
         (limit, limit_info) =
             gen_aexpr(&loop_pcfg.limit, ctx, distribs, funcs, LOOP_EXPR_FUEL);
         (limit, limit_info) =
@@ -309,7 +326,7 @@ fn gen_loop_init(
         &step_info,
         step_ty
     ));
-    let iter_range = gen_iterator_range(step_ty, &init_info, &limit_info);
+    let iter_range = get_iterator_range(step_ty, &init_info, &limit_info);
     LoopInit {
         init,
         iter_range,
@@ -527,12 +544,18 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     let init_info = ExprInfo::from_interval(var_interval);
     let (limit, limit_info) =
         gen_while_limit(pcfg, ctx, distribs, funcs, step_ty, &init_info);
+    let iter_range = get_iterator_range(step_ty, &init_info, &limit_info);
     let mut body_frame =
         ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, true);
     body_frame.pin_vars(&limit_info.vars);
     body_frame.pin_vars(&[var.clone()]);
-    if !do_while {
-        body_frame.new_avar(&var, &ExprInfo::from_interval(var_interval));
+    if do_while {
+        body_frame.new_avar(
+            &var,
+            &ExprInfo::from_interval(iter_range.union(init_info.interval)),
+        );
+    } else {
+        body_frame.new_avar(&var, &iter_range.into());
     }
     let body = gen_while_body(tp, &mut body_frame, distribs, funcs, fuel - 1);
     let sf = body_frame.stack_frame();
@@ -594,6 +617,7 @@ fn gen_duffs_default_and_update_ctx<
     default_frame.pin_vars(&init.limit_info.vars);
     default_frame.pin_vars(&[var.to_string()]);
     default_frame.pin_vars(&sw_info.vars);
+    default_frame.new_avar(var, &ExprInfo::from(init.iter_range));
     let default =
         gen_blocks(pcfg, tp, &mut default_frame, distribs, funcs, fuel - 1);
     let mut sf = default_frame.stack_frame();
@@ -632,6 +656,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
         body_frame.pin_vars(&init.limit_info.vars);
         body_frame.pin_vars(&[var.clone()]);
         body_frame.pin_vars(&sw_info.vars);
+        body_frame.new_avar(&var, &ExprInfo::from(init.iter_range));
         let body =
             gen_blocks(pcfg, tp, &mut body_frame, distribs, funcs, fuel - 1);
         let case = AExpr::Num(

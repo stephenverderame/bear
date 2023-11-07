@@ -100,6 +100,15 @@ impl ExprInfo {
     }
 }
 
+impl From<Interval> for ExprInfo {
+    fn from(interval: Interval) -> Self {
+        Self {
+            vars: Vec::new(),
+            interval,
+        }
+    }
+}
+
 impl std::ops::Add<Self> for ExprInfo {
     type Output = Self;
 
@@ -601,7 +610,13 @@ fn gen_assign<P: StatementPCFG>(
     let expr = if typ == Type::Int {
         let (expr, expr_info) =
             gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
-        ctx.new_avar(&var, &expr_info);
+        if expr_info.vars.contains(&var) && ctx.loop_depth() != 0 {
+            // mutation in a loop
+            // for now, just make it unknown
+            ctx.new_avar(&var, &ExprInfo::make_unknown());
+        } else {
+            ctx.new_avar(&var, &expr_info);
+        }
         Expr::AExpr(expr)
     } else {
         let (expr, info) =
