@@ -7,6 +7,7 @@ extern crate strum;
 extern crate support;
 use pcfg::*;
 mod generator;
+mod lowering;
 
 fn main() {
     let pcfg = pcfg::TopPCFG::uniform();
