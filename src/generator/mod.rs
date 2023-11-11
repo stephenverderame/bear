@@ -453,10 +453,6 @@ fn gen_bool_bexpr(
             BExpr::Or(Box::new(lhs), Box::new(rhs)),
             lhs_info.iter().chain(rhs_info.iter()).cloned().collect(),
         ),
-        BExpr::EQB_IDX => (
-            BExpr::Eqb(Box::new(lhs), Box::new(rhs)),
-            lhs_info.iter().chain(rhs_info.iter()).cloned().collect(),
-        ),
         _ => unreachable!(),
     }
 }
@@ -538,7 +534,7 @@ fn gen_bexpr(
     let idx = if fuel == 0 { BExpr::BOOL_IDX } else { idx };
     #[allow(clippy::map_unwrap_or)]
     let (expr, vars) = match idx {
-        BExpr::AND_IDX | BExpr::OR_IDX | BExpr::EQB_IDX => {
+        BExpr::AND_IDX | BExpr::OR_IDX => {
             gen_bool_bexpr(pcfg, ctx, distrib, funcs, fuel, idx)
         }
         BExpr::LT_IDX
@@ -676,6 +672,8 @@ pub trait StatementTy {
     fn from(stmt: StatementEnum) -> Self
     where
         Self: Sized;
+
+    fn to_enum(self) -> StatementEnum;
 }
 
 fn gen_loop_stmt(
@@ -812,6 +810,10 @@ impl StatementTy for Statement {
             StatementEnum::LoopStmt(..) => unreachable!(),
         }
     }
+
+    fn to_enum(self) -> StatementEnum {
+        StatementEnum::Statement(self)
+    }
 }
 
 impl StatementTy for LoopStatement {
@@ -820,6 +822,10 @@ impl StatementTy for LoopStatement {
             StatementEnum::Statement(stmt) => Self::Stmt(stmt),
             StatementEnum::LoopStmt(stmt) => stmt,
         }
+    }
+
+    fn to_enum(self) -> StatementEnum {
+        StatementEnum::LoopStmt(self)
     }
 }
 
@@ -839,6 +845,20 @@ pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
         &mut funcs,
         STMT_FUEL,
     )
+}
+
+pub fn gen_single_stmt(pcfg: &TopPCFG) -> Statement {
+    match gen_stmt(
+        &pcfg.block.stmt,
+        &pcfg.expr,
+        &mut Context::make_root(),
+        &mut Distribs::new(pcfg),
+        &mut FuncList::new(),
+        None,
+    ) {
+        StatementEnum::Statement(stmt) => stmt,
+        StatementEnum::LoopStmt(..) => unreachable!(),
+    }
 }
 
 pub fn display(program: &[Block<Statement>]) -> String {

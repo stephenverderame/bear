@@ -3,12 +3,21 @@ use bril_rs::{ConstOps, Instruction, Type, ValueOps};
 use crate::bare_c::{AExpr, BExpr, Expr};
 
 /// The result of flattening Bare C expressions into BRIL instructions.
-#[derive(Default)]
 pub(super) struct FlattenResult {
     /// Stack of resulting variable names.
     pub(super) result_stack: Vec<String>,
     pub(super) cur_temp_id: usize,
     pub(super) instrs: Vec<Instruction>,
+}
+
+impl FlattenResult {
+    pub const fn new(cur_temp_id: usize) -> Self {
+        Self {
+            result_stack: vec![],
+            cur_temp_id,
+            instrs: vec![],
+        }
+    }
 }
 
 fn flatten_abinop(
@@ -65,6 +74,7 @@ fn flatten_op_helper(
 /// Flattens a Bare C expression into BRIL instructions.
 /// Returns the resulting instruction sequence and the name of the variable holding the result
 /// as the top of the result stack.
+#[must_use]
 pub(super) fn flatten_aexpr(
     expr: AExpr,
     mut flatten_result: FlattenResult,
@@ -112,6 +122,7 @@ pub(super) fn flatten_aexpr(
 /// Returns the resulting instruction sequence and the name of the variable holding the result
 /// as the top of the result stack.
 #[allow(clippy::too_many_lines)]
+#[must_use]
 pub(super) fn flatten_bexpr(
     expr: BExpr,
     mut flatten_result: FlattenResult,
@@ -133,9 +144,6 @@ pub(super) fn flatten_bexpr(
         }
         BExpr::Eqa(lhs, rhs) => {
             flatten_abinop(flatten_result, *lhs, *rhs, ValueOps::Eq, Type::Bool)
-        }
-        BExpr::Eqb(lhs, rhs) => {
-            flatten_bbinop(flatten_result, *lhs, *rhs, ValueOps::Eq)
         }
         BExpr::Le(lhs, rhs) => {
             flatten_abinop(flatten_result, *lhs, *rhs, ValueOps::Le, Type::Bool)
@@ -186,6 +194,7 @@ pub(super) fn flatten_bexpr(
 /// Flattens a Bare C expression into BRIL instructions.
 /// Returns the resulting instruction sequence and the name of the variable holding the result
 /// as the top of the result stack.
+#[must_use]
 pub(super) fn flatten_expr(
     expr: Expr,
     flatten_result: FlattenResult,

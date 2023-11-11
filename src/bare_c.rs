@@ -31,7 +31,6 @@ pub enum BExpr {
     Gt(Box<AExpr>, Box<AExpr>),
     Le(Box<AExpr>, Box<AExpr>),
     Ge(Box<AExpr>, Box<AExpr>),
-    Eqb(Box<BExpr>, Box<BExpr>),
     Eqa(Box<AExpr>, Box<AExpr>),
     Id(String),
     Bool(bool),
@@ -63,9 +62,6 @@ impl Pretty for BExpr {
             }
             Self::Ge(lhs, rhs) => {
                 format!("(>= {} {})", lhs.pretty(indent), rhs.pretty(indent))
-            }
-            Self::Eqb(lhs, rhs) => {
-                format!("(== {} {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Eqa(lhs, rhs) => {
                 format!("(== {} {})", lhs.pretty(indent), rhs.pretty(indent))

@@ -1,25 +1,21 @@
 use bril_rs::{EffectOps, Instruction, Type, ValueOps};
-use cfg::{BasicBlock, Cfg};
+use cfg::{CfgEdgeTo, CFG_END_ID};
 
-use crate::bare_c::{Expr, LoopStatement, Statement};
+use crate::{
+    bare_c::{Expr, LoopStatement, Pretty, Statement},
+    generator::{StatementEnum, StatementTy},
+};
 
 use super::flattening::{flatten_expr, FlattenResult};
-
-pub(super) struct LowerResult {
-    pub(super) cfg: Cfg,
-    pub(super) block_id: usize,
-    pub(super) cur_block: BasicBlock,
-    pub(super) catch_blocks: Vec<(Option<String>, usize)>,
-    pub(super) continue_blocks: Vec<usize>,
-    pub(super) break_blocks: Vec<usize>,
-}
+use super::LowerResult;
 
 /// Adds instructions of the given `FlattenResult` to the
 /// current block of `LowerResult` and returns the updated
 /// `LowerResult` and the top of the result stack of the `FlattenResult`.
-fn add_instrs_to_result(
-    mut res: LowerResult,
+#[must_use]
+pub(super) fn add_instrs_to_result(
     mut flatten_result: FlattenResult,
+    mut res: LowerResult,
 ) -> (LowerResult, Option<String>) {
     let instr_len = flatten_result.instrs.len() as u64;
     res.cur_block.instrs.extend(
@@ -29,6 +25,7 @@ fn add_instrs_to_result(
             .enumerate()
             .map(|(i, instr)| (res.cfg.next_instr_id + i as u64, instr)),
     );
+    res.cur_temp_id = flatten_result.cur_temp_id;
     res.cfg.next_instr_id += instr_len;
     (res, flatten_result.result_stack.pop())
 }
@@ -43,8 +40,10 @@ const fn expr_type(expr: &Expr) -> Type {
 
 fn lower_assign(dest: String, src: Expr, res: LowerResult) -> LowerResult {
     let op_type = expr_type(&src);
-    let (mut res, src) =
-        add_instrs_to_result(res, flatten_expr(src, FlattenResult::default()));
+    let (mut res, src) = add_instrs_to_result(
+        flatten_expr(src, FlattenResult::new(res.cur_temp_id)),
+        res,
+    );
     res.cur_block.instrs.push((
         res.cfg.next_instr_id,
         Instruction::Value {
@@ -65,8 +64,8 @@ fn lower_ret(e: Option<Expr>, mut res: LowerResult) -> LowerResult {
     #[allow(clippy::option_if_let_else)]
     let src = if let Some(e) = e {
         let (r, src) = add_instrs_to_result(
+            flatten_expr(e, FlattenResult::new(res.cur_temp_id)),
             res,
-            flatten_expr(e, FlattenResult::default()),
         );
         res = r;
         Some(src.unwrap())
@@ -84,15 +83,15 @@ fn lower_ret(e: Option<Expr>, mut res: LowerResult) -> LowerResult {
         },
     ));
     res.cfg.next_instr_id += 1;
-    res
+    res.finish_tail_block(CfgEdgeTo::Next(CFG_END_ID))
 }
 
 fn lower_print(arg_exprs: Vec<Expr>, mut res: LowerResult) -> LowerResult {
     let mut args = vec![];
     for expr in arg_exprs {
         let (r, src) = add_instrs_to_result(
+            flatten_expr(expr, FlattenResult::new(res.cur_temp_id)),
             res,
-            flatten_expr(expr, FlattenResult::default()),
         );
         args.push(src.unwrap());
         res = r;
@@ -116,8 +115,8 @@ fn lower_throw(n: usize, e: Option<Expr>, mut res: LowerResult) -> LowerResult {
     if let Some(e) = e {
         let op_type = expr_type(&e);
         let (r, src) = add_instrs_to_result(
+            flatten_expr(e, FlattenResult::new(res.cur_temp_id)),
             res,
-            flatten_expr(e, FlattenResult::default()),
         );
         res = r;
         let dest = res.catch_blocks[res.catch_blocks.len() - 1 - n]
@@ -150,10 +149,11 @@ fn lower_throw(n: usize, e: Option<Expr>, mut res: LowerResult) -> LowerResult {
         },
     ));
     res.cfg.next_instr_id += 1;
-    res
+    res.finish_tail_block(CfgEdgeTo::Next(target))
 }
 
-fn lower_stmt(stmt: Statement, mut res: LowerResult) -> LowerResult {
+#[must_use]
+fn lower_stmt(stmt: Statement, res: LowerResult) -> LowerResult {
     match stmt {
         Statement::Assign { dest, src } => lower_assign(dest, src, res),
         Statement::PCall(..) => unimplemented!(),
@@ -163,6 +163,7 @@ fn lower_stmt(stmt: Statement, mut res: LowerResult) -> LowerResult {
     }
 }
 
+#[must_use]
 fn lower_loop_stmt(stmt: LoopStatement, mut res: LowerResult) -> LowerResult {
     match stmt {
         LoopStatement::Break(n) => {
@@ -178,7 +179,7 @@ fn lower_loop_stmt(stmt: LoopStatement, mut res: LowerResult) -> LowerResult {
                 },
             ));
             res.cfg.next_instr_id += 1;
-            res
+            res.finish_tail_block(CfgEdgeTo::Next(target))
         }
         LoopStatement::Continue(n) => {
             let target = res.continue_blocks[res.continue_blocks.len() - 1 - n];
@@ -193,10 +194,22 @@ fn lower_loop_stmt(stmt: LoopStatement, mut res: LowerResult) -> LowerResult {
                 },
             ));
             res.cfg.next_instr_id += 1;
-            res
+            res.finish_tail_block(CfgEdgeTo::Next(target))
         }
         LoopStatement::Step(stmt) | LoopStatement::Stmt(stmt) => {
             lower_stmt(stmt, res)
         }
+    }
+}
+
+/// Lowers a statement
+#[must_use]
+pub(super) fn lower_any_stmt<S: StatementTy + Pretty>(
+    s: S,
+    r: LowerResult,
+) -> LowerResult {
+    match s.to_enum() {
+        StatementEnum::Statement(s) => lower_stmt(s, r),
+        StatementEnum::LoopStmt(s) => lower_loop_stmt(s, r),
     }
 }
