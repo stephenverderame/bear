@@ -16,6 +16,12 @@ enum PendingBlockEntry {
     Delim,
 }
 
+/// We use a hole in CFG adj list to indicate that it needs to be filled
+/// when we pop the pending block stack.
+///
+/// This is used if we know one, but not both of the branch targets.
+const CFG_HOLE_ID: usize = usize::MAX;
+
 struct LowerResult {
     pub cfg: Cfg,
     /// Block id of the current block we're working on
@@ -35,6 +41,10 @@ struct LowerResult {
     pub cur_temp_id: usize,
     /// Stack of block ids that are waiting to be added to the cfg adjacency list.
     /// Each block's children pending blocks will be separated by a `Delim` entry.
+    ///
+    /// A delim should be pushed to the stack before a new scope is entered.
+    /// The blocks should be popped up to and including the delim
+    /// by the same syntax construct which pushed the delim.
     pub pending_block_stack: Vec<PendingBlockEntry>,
 }
 
@@ -70,19 +80,65 @@ impl LowerResult {
         self
     }
 
-    /// Starts a new block by popping all blocks from the pending block stack
-    /// and adding an outgoing edge from each of them to the current block.
+    /// Pops all blocks from the pending block stack
+    /// and adds an outgoing edge from each of them to the specified block.
+    /// # Arguments
+    /// * `starting_block_id` - The block id of the block being started
     #[must_use]
-    fn start_block(mut self) -> Self {
+    fn connect_to_block(mut self, starting_block_id: usize) -> Self {
         while let Some(PendingBlockEntry::Block(block_id)) =
             self.pending_block_stack.pop()
         {
-            assert!(self.cfg.adj_lst.get(&block_id).is_none());
-            self.cfg
-                .adj_lst
-                .insert(block_id, CfgEdgeTo::Next(self.cur_block_id));
+            match self.cfg.adj_lst.get_mut(&block_id) {
+                Some(CfgEdgeTo::Branch {
+                    true_node,
+                    false_node,
+                }) if *true_node == CFG_HOLE_ID
+                    && *false_node != CFG_HOLE_ID =>
+                {
+                    *true_node = starting_block_id;
+                }
+                Some(CfgEdgeTo::Branch {
+                    true_node,
+                    false_node,
+                }) if *false_node == CFG_HOLE_ID
+                    && *true_node != CFG_HOLE_ID =>
+                {
+                    *false_node = starting_block_id;
+                }
+                None => {
+                    self.cfg
+                        .adj_lst
+                        .insert(block_id, CfgEdgeTo::Next(starting_block_id));
+                }
+                Some(x) => {
+                    panic!("block {block_id} already has an edge: {x:?}")
+                }
+            }
         }
         self
+    }
+
+    /// Starts a new block by popping all blocks from the pending block stack
+    /// and adding an outgoing edge from each of them to the current block.
+    #[must_use]
+    fn connect_next_block(self) -> Self {
+        let cur_id = self.cur_block_id;
+        self.connect_to_block(cur_id)
+    }
+
+    /// Returns a fresh temporary variable name.
+    fn fresh_temp(&mut self) -> String {
+        let temp_name = format!("_t{}", self.cur_temp_id);
+        self.cur_temp_id += 1;
+        temp_name
+    }
+
+    /// Returns a mutable reference to the current block.
+    /// # Panics
+    /// Panics if the current block is not a basic block.
+    fn get_cur_block(&mut self) -> &mut BasicBlock {
+        &mut self.cur_block
     }
 }
 
@@ -106,11 +162,6 @@ impl LowerResult {
 pub fn lower<S: StatementTy + Pretty>(blocks: Vec<Block<S>>) -> Cfg {
     let mut r = LowerResult::new();
     r = lower_blocks(blocks, r).finish_block(true);
-    while let Some(node) = r.pending_block_stack.pop() {
-        if let PendingBlockEntry::Block(block_id) = node {
-            assert!(r.cfg.adj_lst.get(&block_id).is_none());
-            r.cfg.adj_lst.insert(block_id, CfgEdgeTo::Next(CFG_END_ID));
-        }
-    }
+    r = r.connect_to_block(CFG_END_ID);
     r.cfg
 }

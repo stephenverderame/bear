@@ -14,7 +14,8 @@ use super::{
     Distribs, ExprInfo, StatementTy, StepType, Type, EXPR_FUEL,
 };
 
-const LOOP_MAX_ITER: i64 = 10_000;
+const LOOP_EXPR_FUEL: usize = 4;
+const LOOP_STEP_FUEL: usize = 2;
 
 /// Generates an if statement
 pub(super) fn gen_if<T: Pretty + StatementTy, P: StatementPCFG>(
@@ -151,13 +152,23 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
     res
 }
 
+/// Information for a loop initializer
 struct LoopInit {
+    /// The loop initializer
     init: AExpr,
+    /// The interval of values the loop counter could take on
     iter_range: Interval,
+    /// The loop counter limit
     limit: AExpr,
+    /// The interval of the loop counter limit
     limit_info: ExprInfo,
+    /// The loop step
     step: AExpr,
+    /// The interval of the loop step
     step_info: ExprInfo,
+    /// The numter of iterations a given loop with this initializer, limit, and step
+    /// will run for
+    max_iters: i64,
 }
 
 /// Corrects the loop step to ensure that the loop can be run and that it terminates
@@ -166,7 +177,8 @@ pub(super) fn correct_loop_step(
     mut step: AExpr,
     mut step_info: ExprInfo,
 ) -> (AExpr, ExprInfo) {
-    if step_ty == StepType::Inc && step_info.interval.contains(0) {
+    assert_ne!(step_ty, StepType::None);
+    if step_ty == StepType::Inc && step_info.interval.contains_nonpositive() {
         let lower_bound = step_info.interval.lower_bound();
         let addend = lower_bound.saturating_abs();
         let inc = if -addend == lower_bound { 1 } else { 2 };
@@ -177,7 +189,9 @@ pub(super) fn correct_loop_step(
         step_info.interval = step_info.interval
             + Interval::from_const(addend)
             + Interval::from_const(inc);
-    } else if step_ty == StepType::Dec && step_info.interval.contains(0) {
+    } else if step_ty == StepType::Dec
+        && step_info.interval.contains_nonnegative()
+    {
         let upper_bound = step_info.interval.upper_bound();
         let subtractend = upper_bound.saturating_abs();
         let inc = if -subtractend == upper_bound { 1 } else { 2 };
@@ -192,6 +206,10 @@ pub(super) fn correct_loop_step(
             - Interval::from_const(subtractend)
             - Interval::from_const(inc);
     }
+    assert!(
+        step_ty == StepType::Inc && step_info.interval.is_positive()
+            || step_ty == StepType::Dec && step_info.interval.is_negative()
+    );
     (step, step_info)
 }
 
@@ -236,12 +254,13 @@ fn correct_loop_limit(
     (limit, limit_info)
 }
 
-/// Gets the range an iterator could take on in a loop body.
+/// Gets the range a loop counter could take on in a loop body.
 fn get_iterator_range(
     step_ty: StepType,
     init_info: &ExprInfo,
     limit_info: &ExprInfo,
 ) -> Interval {
+    assert_ne!(step_ty, StepType::None);
     if step_ty == StepType::Inc {
         Interval::new(
             init_info.interval.lower_bound(),
@@ -255,32 +274,65 @@ fn get_iterator_range(
     }
 }
 
+/// Gets the maximum number of iterations a loop with the given
+/// initializer, limit, and step will run for
+///
+/// Requires step to be positive for an increasing loop
+/// and negative for a decreasing loop
+fn get_loop_max_iters(
+    init_info: &ExprInfo,
+    limit_info: &ExprInfo,
+    step_info: &ExprInfo,
+    step_ty: StepType,
+) -> i64 {
+    assert!(
+        step_ty == StepType::Inc && step_info.interval.is_positive()
+            || step_ty == StepType::Dec && step_info.interval.is_negative()
+    );
+    match step_ty {
+        StepType::Inc => limit_info
+            .interval
+            .upper_bound()
+            .saturating_sub(init_info.interval.lower_bound())
+            .saturating_div(step_info.interval.lower_bound())
+            .abs(),
+        StepType::Dec => init_info
+            .interval
+            .upper_bound()
+            .saturating_sub(limit_info.interval.lower_bound())
+            .saturating_div(step_info.interval.upper_bound())
+            .abs(),
+        StepType::None => unreachable!(),
+    }
+}
+
 /// Returns true if the combination of the loop bounds and step will cause the
 /// loop to potentially run too long
+/// # Arguments
+/// * `limit_info` - The interval of the loop limit
+/// * `init_info` - The interval of the loop initializer
+/// * `step_info` - The interval of the loop step
+/// * `step_ty` - The type of the loop step
+/// * `max_iter` - The maximum number of iterations the loop is allowed to
+/// run for
 fn is_invalid_loop_bounds(
     limit_info: &ExprInfo,
     init_info: &ExprInfo,
     step_info: &ExprInfo,
     step_ty: StepType,
+    max_iter: u64,
 ) -> bool {
+    let max_iter = max_iter.try_into().unwrap();
+    assert!(max_iter > 1);
     (step_ty == StepType::Inc
-        && (step_info.interval.lower_bound() == 0
-            || limit_info
-                .interval
-                .upper_bound()
-                .saturating_sub(init_info.interval.lower_bound())
-                .saturating_div(step_info.interval.lower_bound())
-                .abs()
-                > LOOP_MAX_ITER))
+        && (!step_info.interval.is_positive()
+            || get_loop_max_iters(init_info, limit_info, step_info, step_ty)
+                > max_iter))
         || (step_ty == StepType::Dec
-            && (step_info.interval.upper_bound() == 0
-                || init_info
-                    .interval
-                    .upper_bound()
-                    .saturating_sub(limit_info.interval.lower_bound())
-                    .saturating_div(step_info.interval.upper_bound())
-                    .abs()
-                    > LOOP_MAX_ITER))
+            && (!step_info.interval.is_negative()
+                || get_loop_max_iters(
+                    init_info, limit_info, step_info, step_ty,
+                ) > max_iter))
 }
 
 /// Generates the loop initializer, limiter, and step
@@ -291,21 +343,14 @@ fn gen_loop_init(
     funcs: &mut FuncList,
     step_ty: StepType,
 ) -> LoopInit {
-    const LOOP_EXPR_FUEL: usize = 4;
-    const LOOP_STEP_FUEL: usize = 2;
-    let (mut init, mut init_info) =
-        gen_aexpr(&loop_pcfg.init, ctx, distribs, funcs, LOOP_EXPR_FUEL);
-    let (mut limit, mut limit_info) =
-        gen_aexpr(&loop_pcfg.limit, ctx, distribs, funcs, LOOP_EXPR_FUEL);
-    let (mut step, mut step_info) =
-        gen_aexpr(&loop_pcfg.step, ctx, distribs, funcs, LOOP_STEP_FUEL);
-    (limit, limit_info) =
-        correct_loop_limit(step_ty, &init_info, limit, limit_info);
-    (step, step_info) = correct_loop_step(step_ty, step, step_info);
     let mut tries = 0;
-    while tries < 3
-        && is_invalid_loop_bounds(&limit_info, &init_info, &step_info, step_ty)
-    {
+    let mut init;
+    let mut init_info;
+    let mut limit;
+    let mut limit_info;
+    let mut step;
+    let mut step_info;
+    loop {
         (init, init_info) =
             gen_aexpr(&loop_pcfg.init, ctx, distribs, funcs, LOOP_EXPR_FUEL);
         (limit, limit_info) =
@@ -316,17 +361,29 @@ fn gen_loop_init(
             gen_aexpr(&loop_pcfg.step, ctx, distribs, funcs, LOOP_STEP_FUEL);
         (step, step_info) = correct_loop_step(step_ty, step, step_info);
         tries += 1;
+        if tries > 3
+            || !is_invalid_loop_bounds(
+                &limit_info,
+                &init_info,
+                &step_info,
+                step_ty,
+                ctx.max_loop_iter(),
+            )
+        {
+            break;
+        }
     }
-    (limit, limit_info) = force_correct_while_limit(
-        limit_info, limit, &init_info, &step_info, step_ty,
-    );
-    assert!(!is_invalid_loop_bounds(
-        &limit_info,
+    (limit, limit_info) = force_correct_loop_limit(
+        limit_info,
+        limit,
         &init_info,
         &step_info,
-        step_ty
-    ));
+        step_ty,
+        ctx.max_loop_iter(),
+    );
     let iter_range = get_iterator_range(step_ty, &init_info, &limit_info);
+    let max_iters =
+        get_loop_max_iters(&init_info, &limit_info, &step_info, step_ty);
     LoopInit {
         init,
         iter_range,
@@ -334,6 +391,7 @@ fn gen_loop_init(
         limit_info,
         step,
         step_info,
+        max_iters,
     }
 }
 
@@ -354,8 +412,13 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
         StepType::Dec
     };
     let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
-    let mut body_frame =
-        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, false);
+    let mut body_frame = ctx.loop_child_frame(
+        step_ty,
+        0.5_f64.ln(),
+        &var,
+        false,
+        init.max_iters,
+    );
     body_frame.new_avar(&var, &ExprInfo::from_interval(init.iter_range));
     body_frame.pin_vars(&init.limit_info.vars);
     body_frame.pin_vars(&init.step_info.vars);
@@ -409,43 +472,75 @@ fn gen_while_var<T: Pretty + StatementTy>(
     }
 }
 
-/// If a while loop has an invalid limit, this function will force the limit
+/// If a loop has an invalid limit, this function will force the limit
 /// to be correct by adding or subtracting `MAX_LOOP_ITER` from the limit
-/// so that the loop can run at most `MAX_LOOP_ITER` times
+/// so that the loop can run at most `MAX_LOOP_ITER` times.
+///
+/// If the limit is already correct, this function will return the original
 /// # Returns
 /// A tuple of the corrected limit and its interval or the original limit and its interval
 /// if the limit was already correct
-fn force_correct_while_limit(
+/// # Arguments
+/// * `limit_info` - The interval of the loop limit
+/// * `limit` - The loop limit
+/// * `init_info` - The interval of the loop initializer
+/// * `step_info` - The interval of the loop step
+/// * `step_ty` - The type of the loop step
+/// * `max_iter` - The maximum number of iterations the loop is allowed to
+/// run for
+fn force_correct_loop_limit(
     mut limit_info: ExprInfo,
     mut limit: AExpr,
     init_info: &ExprInfo,
-    worst_case_step_info: &ExprInfo,
+    step_info: &ExprInfo,
     step_ty: StepType,
+    max_iter: u64,
 ) -> (AExpr, ExprInfo) {
     if is_invalid_loop_bounds(
         &limit_info,
         init_info,
-        worst_case_step_info,
+        step_info,
         step_ty,
+        max_iter,
     ) {
+        let max_iter: i64 = max_iter.try_into().unwrap();
+        assert!(max_iter > 1);
         if step_ty == StepType::Inc {
+            assert!(step_info.interval.is_positive());
             limit = AExpr::Add(
                 Box::new(AExpr::Num(init_info.interval.lower_bound())),
-                Box::new(AExpr::Num(LOOP_MAX_ITER)),
+                Box::new(AExpr::Num(
+                    max_iter * step_info.interval.lower_bound() - 1,
+                )),
             );
             limit_info = ExprInfo::from_const(
-                init_info.interval.lower_bound() + LOOP_MAX_ITER,
+                init_info.interval.lower_bound() + max_iter - 1,
+            );
+        } else if step_ty == StepType::Dec {
+            assert!(step_info.interval.is_negative());
+            limit = AExpr::Add(
+                Box::new(AExpr::Num(init_info.interval.upper_bound())),
+                Box::new(AExpr::Num(
+                    // max_iter is positive, step_info.interval is negative
+                    max_iter * step_info.interval.upper_bound() + 1,
+                )),
+            );
+            limit_info = ExprInfo::from_const(
+                init_info.interval.upper_bound()
+                    + max_iter * step_info.interval.upper_bound()
+                    + 1,
             );
         } else {
-            limit = AExpr::Sub(
-                Box::new(AExpr::Num(init_info.interval.upper_bound())),
-                Box::new(AExpr::Num(LOOP_MAX_ITER)),
-            );
-            limit_info = ExprInfo::from_const(
-                init_info.interval.upper_bound() - LOOP_MAX_ITER,
-            );
+            panic!("Invalid step type");
         }
     }
+    assert!(!is_invalid_loop_bounds(
+        &limit_info,
+        init_info,
+        step_info,
+        step_ty,
+        max_iter,
+    ));
     (limit, limit_info)
 }
 
@@ -474,6 +569,7 @@ fn gen_while_limit<P: StatementPCFG>(
             init_info,
             &worst_case_step_info,
             step_ty,
+            ctx.max_loop_iter(),
         )
     {
         (limit, limit_info) = gen_aexpr(
@@ -487,12 +583,13 @@ fn gen_while_limit<P: StatementPCFG>(
             correct_loop_limit(step_ty, init_info, limit, limit_info);
         tries += 1;
     }
-    force_correct_while_limit(
+    force_correct_loop_limit(
         limit_info,
         limit,
         init_info,
         &worst_case_step_info,
         step_ty,
+        ctx.max_loop_iter(),
     )
 }
 
@@ -517,6 +614,27 @@ fn gen_while_body(
     body
 }
 
+fn worst_case_step_info(step_ty: StepType) -> Interval {
+    if step_ty == StepType::Inc {
+        Interval::from_const(1)
+    } else {
+        Interval::from_const(0)
+    }
+}
+
+fn gen_step_ty<P: StatementPCFG>(
+    distribs: &mut Distribs,
+    pcfg: &BlockPCFG<P>,
+) -> StepType {
+    if distribs.uniform.sample(&mut thread_rng())
+        < pcfg.loop_pcfg.inc_or_dec.exp()
+    {
+        StepType::Inc
+    } else {
+        StepType::Dec
+    }
+}
+
 fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     pcfg: &BlockPCFG<P>,
     tp: &TopPCFG,
@@ -525,19 +643,10 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> Vec<Block<T>> {
-    if fuel < 2 {
+    if fuel < 2 || ctx.is_dead() {
         return gen_block(pcfg, tp, ctx, distribs, funcs, fuel);
     }
-    if ctx.is_dead() {
-        return gen_block(pcfg, tp, ctx, distribs, funcs, fuel);
-    }
-    let step_ty = if distribs.uniform.sample(&mut thread_rng())
-        < pcfg.loop_pcfg.inc_or_dec.exp()
-    {
-        StepType::Inc
-    } else {
-        StepType::Dec
-    };
+    let step_ty = gen_step_ty(distribs, pcfg);
     let do_while = distribs.uniform.sample(&mut thread_rng()) < 0.5;
     let (init_block, var, var_interval) =
         gen_while_var(tp, ctx, distribs, funcs, fuel);
@@ -545,8 +654,14 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     let (limit, limit_info) =
         gen_while_limit(pcfg, ctx, distribs, funcs, step_ty, &init_info);
     let iter_range = get_iterator_range(step_ty, &init_info, &limit_info);
+    let cur_loop_iters = get_loop_max_iters(
+        &init_info,
+        &limit_info,
+        &ExprInfo::from_interval(worst_case_step_info(step_ty)),
+        step_ty,
+    );
     let mut body_frame =
-        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, true);
+        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, true, cur_loop_iters);
     body_frame.pin_vars(&limit_info.vars);
     body_frame.pin_vars(&[var.clone()]);
     if do_while {
@@ -613,7 +728,7 @@ fn gen_duffs_default_and_update_ctx<
     frames: Vec<StackFrame>,
 ) -> Vec<Block<T>> {
     let mut default_frame =
-        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), var, false);
+        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), var, false, init.max_iters);
     default_frame.pin_vars(&init.limit_info.vars);
     default_frame.pin_vars(&[var.to_string()]);
     default_frame.pin_vars(&sw_info.vars);
@@ -636,13 +751,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> Block<T> {
-    let step_ty = if distribs.uniform.sample(&mut thread_rng())
-        < pcfg.loop_pcfg.inc_or_dec.exp()
-    {
-        StepType::Inc
-    } else {
-        StepType::Dec
-    };
+    let step_ty = gen_step_ty(distribs, pcfg);
     let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
     let var = ctx.new_var();
     let (switch, sw_info) = gen_switch_guard(tp, ctx, distribs, funcs);
@@ -651,8 +760,13 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     while (bodies.len() < 2 && sw_info.interval.len() > 3)
         || distribs.uniform.sample(&mut thread_rng()) < pcfg.case_seq.exp()
     {
-        let mut body_frame =
-            ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, false);
+        let mut body_frame = ctx.loop_child_frame(
+            step_ty,
+            0.5_f64.ln(),
+            &var,
+            false,
+            init.max_iters,
+        );
         body_frame.pin_vars(&init.limit_info.vars);
         body_frame.pin_vars(&[var.clone()]);
         body_frame.pin_vars(&sw_info.vars);
@@ -718,21 +832,22 @@ pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
         Block::<Statement>::IF_IDX => {
             vec![gen_if(pcfg, tp, ctx, distribs, funcs, fuel)]
         }
-        Block::<Statement>::SWITCH_IDX => {
-            vec![gen_switch(pcfg, tp, ctx, distribs, funcs, fuel)]
-        }
-        Block::<Statement>::TRYCATCH_IDX => {
-            vec![gen_try_catch(pcfg, tp, ctx, distribs, funcs, fuel)]
-        }
-        Block::<Statement>::FOR_IDX => {
+        // Block::<Statement>::SWITCH_IDX => {
+        //     vec![gen_switch(pcfg, tp, ctx, distribs, funcs, fuel)]
+        // }
+        // Block::<Statement>::TRYCATCH_IDX => {
+        //     vec![gen_try_catch(pcfg, tp, ctx, distribs, funcs, fuel)]
+        // }
+        Block::<Statement>::FOR_IDX if ctx.max_loop_iter() > 10 => {
             vec![gen_for(pcfg, tp, ctx, distribs, funcs, fuel)]
         }
-        Block::<Statement>::WHILE_IDX => {
-            gen_while(pcfg, tp, ctx, distribs, funcs, fuel)
-        }
-        Block::<Statement>::DUFFS_IDX => {
-            vec![gen_duffs(pcfg, tp, ctx, distribs, funcs, fuel)]
-        }
-        _ => unreachable!(),
+        // Block::<Statement>::WHILE_IDX => {
+        //     gen_while(pcfg, tp, ctx, distribs, funcs, fuel)
+        // }
+        // Block::<Statement>::DUFFS_IDX => {
+        //     vec![gen_duffs(pcfg, tp, ctx, distribs, funcs, fuel)]
+        // }
+        _ => gen_block(pcfg, tp, ctx, distribs, funcs, fuel),
+        // _ => unreachable!(),
     }
 }

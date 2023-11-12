@@ -43,28 +43,28 @@ impl Pretty for BExpr {
     fn pretty(&self, indent: isize) -> String {
         match self {
             Self::And(lhs, rhs) => {
-                format!("(&& {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} && {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Not(expr) => {
-                format!("(! {})", expr.pretty(indent))
+                format!("!({})", expr.pretty(indent))
             }
             Self::Or(lhs, rhs) => {
-                format!("(|| {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} || {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Lt(lhs, rhs) => {
-                format!("(< {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} < {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Gt(lhs, rhs) => {
-                format!("(> {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} > {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Le(lhs, rhs) => {
-                format!("(<= {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} <= {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Ge(lhs, rhs) => {
-                format!("(>= {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} >= {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Eqa(lhs, rhs) => {
-                format!("(== {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} == {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Id(id) => id.clone(),
             Self::Bool(b) => b.to_string(),
@@ -77,10 +77,10 @@ impl Pretty for BExpr {
                 res
             }
             Self::Redundant(expr) => {
-                format!("(r {{ {} }})", expr.pretty(indent))
+                format!("r({})", expr.pretty(indent))
             }
             Self::LoopInvariant(expr) => {
-                format!("(liv {{ {} }})", expr.pretty(indent))
+                format!("liv({})", expr.pretty(indent))
             }
         }
     }
@@ -117,16 +117,16 @@ impl Pretty for AExpr {
     fn pretty(&self, indent: isize) -> String {
         match self {
             Self::Add(lhs, rhs) => {
-                format!("(+ {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} + {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Sub(lhs, rhs) => {
-                format!("(- {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} - {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Mul(lhs, rhs) => {
-                format!("(* {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} * {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Div(lhs, rhs) => {
-                format!("(/ {} {})", lhs.pretty(indent), rhs.pretty(indent))
+                format!("({} / {})", lhs.pretty(indent), rhs.pretty(indent))
             }
             Self::Id(id) => id.clone(),
             Self::Num(n) => n.to_string(),
@@ -139,13 +139,13 @@ impl Pretty for AExpr {
                 res
             }
             Self::Redundant(expr) => {
-                format!("(r {{ {} }})", expr.pretty(indent))
+                format!("r({})", expr.pretty(indent))
             }
             Self::LoopInvariant(expr) => {
-                format!("(liv {{ {} }})", expr.pretty(indent))
+                format!("liv({})", expr.pretty(indent))
             }
             Self::Derived(expr) => {
-                format!("(iv {{ {} }})", expr.pretty(indent))
+                format!("iv({})", expr.pretty(indent))
             }
         }
     }
@@ -494,4 +494,14 @@ impl<T: Pretty> Pretty for Block<T> {
             }
         }
     }
+}
+
+/// Pretty prints a block of statements
+pub fn display(program: &[Block<Statement>]) -> String {
+    let mut res = String::new();
+    for block in program {
+        res += &block.pretty(0);
+        res += "\n";
+    }
+    res
 }

@@ -113,6 +113,8 @@ pub(super) struct StackFrame {
     can_follow: bool,
     /// Whether the current path is dead
     is_dead: bool,
+    /// The maximum loop iterations at the current nest level
+    loop_max_iter: u64,
 }
 
 /// The `StackLevel` keeps track of the current nesting level of the stack
@@ -135,6 +137,7 @@ impl StackFrame {
             ret_intval: self.ret_intval,
             can_follow: self.can_follow,
             is_dead: self.is_dead,
+            loop_max_iter: self.loop_max_iter,
         }
     }
 
@@ -148,6 +151,7 @@ impl StackFrame {
             ret_intval: None,
             can_follow: true,
             is_dead: true,
+            loop_max_iter: self.loop_max_iter,
         }
     }
 
@@ -163,6 +167,7 @@ impl StackFrame {
         pin_prob: f64,
         loop_var: &str,
         need_step: bool,
+        max_iter: u64,
     ) -> Self {
         let mut c = self.new_child();
         for nm in self
@@ -180,6 +185,9 @@ impl StackFrame {
         }
         c.nests.nested_loops.push(loop_var.to_string());
         c.pending_step = if need_step { step } else { StepType::None };
+        if max_iter != 0 {
+            c.loop_max_iter /= max_iter;
+        }
         c
     }
 
@@ -224,6 +232,7 @@ impl StackFrame {
             ret_intval: self.ret_intval,
             can_follow: self.can_follow || other.can_follow,
             is_dead: self.is_dead && other.is_dead,
+            loop_max_iter: self.loop_max_iter,
         }
     }
 
@@ -254,6 +263,7 @@ impl Default for StackFrame {
             ret_intval: Option::default(),
             can_follow: true,
             is_dead: false,
+            loop_max_iter: super::LOOP_MAX_ITER,
         }
     }
 }
@@ -357,15 +367,24 @@ impl<'a> Context<'a> {
     /// * `pin_prob` - The log probability that a variable will be pinned (made loop invariant)
     /// * `loop_var` - The name of the loop variable
     /// * `need_step` - Whether the loop counter needs to be stepped by the child
+    /// * `max_iter` - The maximum number of iterations of the loop for which we
+    /// are making a child context from
     pub fn loop_child_frame(
         &'a self,
         step: StepType,
         pin_prob: f64,
         loop_var: &str,
         need_step: bool,
+        max_iter: i64,
     ) -> Self {
         Self {
-            cur: self.cur.loop_child(step, pin_prob, loop_var, need_step),
+            cur: self.cur.loop_child(
+                step,
+                pin_prob,
+                loop_var,
+                need_step,
+                max_iter.try_into().unwrap(),
+            ),
             parent: Some(self),
         }
     }
@@ -591,5 +610,9 @@ impl<'a> Context<'a> {
 
     pub(super) fn set_step(&mut self) {
         self.cur.pending_step = StepType::None;
+    }
+
+    pub(super) fn max_loop_iter(&self) -> u64 {
+        self.cur.loop_max_iter
     }
 }

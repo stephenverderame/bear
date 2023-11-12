@@ -25,7 +25,8 @@ use crate::{
 use self::context::Context;
 
 const EXPR_FUEL: usize = 5;
-const STMT_FUEL: usize = 4;
+const STMT_FUEL: usize = 2;
+const LOOP_MAX_ITER: u64 = 10_000;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
 enum Type {
@@ -829,14 +830,38 @@ impl StatementTy for LoopStatement {
     }
 }
 
-pub fn gen_program(pcfg: &TopPCFG) -> Vec<Block<Statement>> {
+/// A function argument and its range of values
+pub enum FArg {
+    Int { name: String, interval: Interval },
+    Bool { name: String },
+}
+
+impl FArg {
+    pub fn int(name: &str, min: i64, max: i64) -> Self {
+        Self::Int {
+            name: name.to_string(),
+            interval: Interval::new(min, max),
+        }
+    }
+
+    pub fn bool(name: &str) -> Self {
+        Self::Bool {
+            name: name.to_string(),
+        }
+    }
+}
+
+pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
     let mut funcs = FuncList::new();
     let mut ctx = Context::make_root();
-    ctx.new_avar("a", &ExprInfo::from_interval(Interval::new(0, 100)));
-    ctx.new_avar("b", &ExprInfo::from_interval(Interval::new(0, 100)));
-    ctx.new_avar("c", &ExprInfo::from_interval(Interval::new(0, 100)));
-    ctx.new_bvar("d", vec![]);
-    ctx.new_bvar("e", vec![]);
+    for a in args {
+        match a {
+            FArg::Int { name, interval } => {
+                ctx.new_avar(name, &ExprInfo::from_interval(*interval))
+            }
+            FArg::Bool { name } => ctx.new_bvar(name, vec![]),
+        }
+    }
     control_flow::gen_blocks(
         &pcfg.block,
         pcfg,
@@ -861,26 +886,37 @@ pub fn gen_single_stmt(pcfg: &TopPCFG) -> Statement {
     }
 }
 
-pub fn display(program: &[Block<Statement>]) -> String {
-    let mut res = String::new();
-    for block in program {
-        res += &block.pretty(0);
-        res += "\n";
-    }
-    res
-}
-
 #[cfg(test)]
 mod test {
     use crate::pcfg::PCFG;
 
-    use super::gen_program;
+    use super::{gen_function, interval::Interval, FArg};
 
     #[test]
     fn running_test() {
         let pcfg = crate::pcfg::TopPCFG::uniform();
+        let args = vec![
+            FArg::Int {
+                name: "a".to_string(),
+                interval: Interval::new(0, 100),
+            },
+            FArg::Int {
+                name: "b".to_string(),
+                interval: Interval::new(-100, 100),
+            },
+            FArg::Int {
+                name: "c".to_string(),
+                interval: Interval::new(0, 100),
+            },
+            FArg::Bool {
+                name: "d".to_string(),
+            },
+            FArg::Bool {
+                name: "e".to_string(),
+            },
+        ];
         for _ in 0..30 {
-            gen_program(&pcfg);
+            gen_function(&pcfg, &args);
         }
     }
 }

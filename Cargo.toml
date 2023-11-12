@@ -14,6 +14,7 @@ strum_macros = "0.25.0"
 support = { path = "./support" }
 rand = "0.8.5"
 static_assertions = "1.1.0"
+wait-timeout = "0.2.0"
 
 [dependencies.clap]
 version = "4.4.1"

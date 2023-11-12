@@ -1,3 +1,5 @@
+use std::ops::{Range, RangeInclusive};
+
 /// An inclusive interval of integers
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct Interval {
@@ -41,6 +43,17 @@ impl Interval {
         }
     }
 
+    /// Constructs an interval from a slice of integers
+    pub fn from_slice(slice: &[i64]) -> Self {
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for &a in slice {
+            min = min.min(a);
+            max = max.max(a);
+        }
+        Self { min, max }
+    }
+
     /// Constructs an interval from two integers, if the lower bound is greater
     /// than the upper bound, the upper bound is clamped to the lower bound
     pub fn new_clamped_lower(lower: i64, upper: i64) -> Self {
@@ -73,16 +86,46 @@ impl Interval {
             .saturating_sub(self.min)
             .saturating_abs()
     }
+
+    /// Returns true if the interval contains only positive numbers
+    pub const fn is_positive(&self) -> bool {
+        self.min > 0 && self.max > 0
+    }
+
+    /// Returns true if the interval contains only negative numbers
+    pub const fn is_negative(&self) -> bool {
+        self.max < 0 && self.min < 0
+    }
+
+    /// Returns true if the interval contains negative numbers or zero
+    pub const fn contains_nonpositive(&self) -> bool {
+        assert!(self.max >= self.min);
+        self.min <= 0
+    }
+
+    /// Returns true if the interval contains positive numbers or zero
+    pub const fn contains_nonnegative(&self) -> bool {
+        assert!(self.max >= self.min);
+        self.max >= 0
+    }
+
+    /// Converts the interval to a range
+    pub const fn to_range(self) -> std::ops::RangeInclusive<i64> {
+        assert!(self.min <= self.max);
+        self.min..=self.max
+    }
 }
 
 impl std::ops::Add<Self> for Interval {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Self {
-            min: self.min.saturating_add(rhs.min),
-            max: self.max.saturating_add(rhs.max),
-        }
+        Self::from_slice(&[
+            self.min.saturating_add(rhs.min),
+            self.min.saturating_add(rhs.max),
+            self.max.saturating_add(rhs.max),
+            self.max.saturating_add(rhs.min),
+        ])
     }
 }
 
@@ -90,10 +133,12 @@ impl std::ops::Sub<Self> for Interval {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        Self::new(
+        Self::from_slice(&[
             self.min.saturating_sub(rhs.max),
+            self.min.saturating_sub(rhs.min),
             self.max.saturating_sub(rhs.min),
-        )
+            self.max.saturating_sub(rhs.max),
+        ])
     }
 }
 
@@ -101,10 +146,12 @@ impl std::ops::Mul<Self> for Interval {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        Self::new(
+        Self::from_slice(&[
             self.min.saturating_mul(rhs.min),
+            self.min.saturating_mul(rhs.max),
             self.max.saturating_mul(rhs.max),
-        )
+            self.max.saturating_mul(rhs.min),
+        ])
     }
 }
 
@@ -112,10 +159,12 @@ impl std::ops::Div<Self> for Interval {
     type Output = Self;
 
     fn div(self, rhs: Self) -> Self::Output {
-        Self::new(
+        Self::from_slice(&[
             self.min.saturating_div(rhs.max),
+            self.min.saturating_div(rhs.min),
             self.max.saturating_div(rhs.min),
-        )
+            self.max.saturating_div(rhs.max),
+        ])
     }
 }
 
@@ -133,8 +182,8 @@ mod test {
         let j = Interval::new(c, d);
         assert_eq!(i + j, Interval::new(a + c, b + d));
         assert_eq!(i - j, Interval::new(a - d, b - c));
-        assert_eq!(i * j, Interval::new(a * c, b * d));
-        assert_eq!(i / j, Interval::new(a / d, b / c));
+        assert_eq!(i * j, Interval::new(-2000, 3000));
+        assert_eq!(i / j, Interval::new(-5, 3));
     }
 
     #[test]
