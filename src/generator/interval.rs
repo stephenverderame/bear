@@ -1,11 +1,7 @@
-use std::ops::{Range, RangeInclusive};
-
 /// An inclusive interval of integers
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct Interval {
-    /// None for -infinity
     min: i64,
-    /// None for +infinity
     max: i64,
 }
 
@@ -43,7 +39,8 @@ impl Interval {
         }
     }
 
-    /// Constructs an interval from a slice of integers
+    /// Constructs the smallest interval containing all elements of the slice
+    /// Requires the slice to be non-empty
     pub fn from_slice(slice: &[i64]) -> Self {
         let mut min = i64::MAX;
         let mut max = i64::MIN;
@@ -52,15 +49,6 @@ impl Interval {
             max = max.max(a);
         }
         Self { min, max }
-    }
-
-    /// Constructs an interval from two integers, if the lower bound is greater
-    /// than the upper bound, the upper bound is clamped to the lower bound
-    pub fn new_clamped_lower(lower: i64, upper: i64) -> Self {
-        Self {
-            min: lower,
-            max: upper.max(lower),
-        }
     }
 
     pub const fn lower_bound(&self) -> i64 {
@@ -74,12 +62,15 @@ impl Interval {
     /// Returns the union of two intervals (the smallest interval that contains
     /// both intervals)
     pub fn union(&self, other: Self) -> Self {
+        assert!(self.max >= self.min);
+        assert!(other.max >= other.min);
         Self {
             min: self.min.min(other.min),
             max: self.max.max(other.max),
         }
     }
 
+    /// Returns the number of integers contained in the interval
     pub const fn len(&self) -> i64 {
         self.max
             .saturating_add(1)

@@ -404,13 +404,7 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
     fuel: usize,
 ) -> Block<T> {
     let var = ctx.new_var();
-    let step_ty = if distribs.uniform.sample(&mut thread_rng())
-        < pcfg.loop_pcfg.inc_or_dec.exp()
-    {
-        StepType::Inc
-    } else {
-        StepType::Dec
-    };
+    let step_ty = gen_step_ty(distribs, pcfg);
     let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
     let mut body_frame = ctx.loop_child_frame(
         step_ty,

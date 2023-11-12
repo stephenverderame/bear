@@ -612,7 +612,7 @@ impl<'a> Context<'a> {
         self.cur.pending_step = StepType::None;
     }
 
-    pub(super) fn max_loop_iter(&self) -> u64 {
+    pub(super) const fn max_loop_iter(&self) -> u64 {
         self.cur.loop_max_iter
     }
 }

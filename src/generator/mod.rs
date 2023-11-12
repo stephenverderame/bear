@@ -26,8 +26,10 @@ use self::context::Context;
 
 const EXPR_FUEL: usize = 5;
 const STMT_FUEL: usize = 2;
+/// Maximum total amount of loop iteration a loop nest can have
 const LOOP_MAX_ITER: u64 = 10_000;
 
+/// Bare C types
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
 enum Type {
     Int,
@@ -208,15 +210,11 @@ fn gen_div(
         (rhs, rhs_info) = gen_aexpr(pcfg, ctx, distrib, funcs, fuel - 1);
     }
     if rhs_info.interval.contains(0) {
-        rhs = AExpr::Add(
-            Box::new(rhs),
-            Box::new(AExpr::Num(rhs_info.interval.lower_bound().abs() + 1)),
-        );
-        rhs_info.interval = Interval::new_clamped_lower(
-            rhs_info.interval.lower_bound().abs() + 1,
-            rhs_info.interval.upper_bound(),
-        );
+        let addend = rhs_info.interval.lower_bound().abs() + 1;
+        rhs = AExpr::Add(Box::new(rhs), Box::new(AExpr::Num(addend)));
+        rhs_info.interval = rhs_info.interval + Interval::from_const(addend);
     }
+    assert!(!rhs_info.interval.contains(0));
     (
         AExpr::Div(Box::new(lhs), Box::new(rhs)),
         lhs_info / rhs_info,
@@ -857,7 +855,7 @@ pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
     for a in args {
         match a {
             FArg::Int { name, interval } => {
-                ctx.new_avar(name, &ExprInfo::from_interval(*interval))
+                ctx.new_avar(name, &ExprInfo::from_interval(*interval));
             }
             FArg::Bool { name } => ctx.new_bvar(name, vec![]),
         }
