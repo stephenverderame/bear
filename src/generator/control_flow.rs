@@ -1,17 +1,19 @@
-use rand::{
-    distributions::Uniform, prelude::Distribution, seq::SliceRandom, thread_rng,
-};
+use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom};
 
 use crate::{
     bare_c::{AExpr, Block, DuffsInfo, LoopStatement, Pretty, Statement},
+    generator::LOOP_MAX_ITER,
     pcfg::{BlockPCFG, LoopPCFG, StatementPCFG, TopPCFG},
 };
 
 use super::{
     context::{Context, FuncList, StackFrame},
-    gen_aexpr, gen_bexpr, gen_stmt,
+    expr::{gen_aexpr, gen_bexpr},
     interval::Interval,
-    Distribs, ExprInfo, StatementTy, StepType, Type, EXPR_FUEL,
+    rnd,
+    stmt::gen_stmt,
+    stmt::StatementTy,
+    Distribs, ExprInfo, StepType, Type, EXPR_FUEL,
 };
 
 const LOOP_EXPR_FUEL: usize = 4;
@@ -55,11 +57,11 @@ fn gen_switch<T: Pretty + StatementTy, P: StatementPCFG>(
     let (switch, sw_info) = gen_switch_guard(tp, ctx, distribs, funcs);
     let mut cases = vec![];
     while (cases.len() < 2 && sw_info.interval.len() > 3)
-        || distribs.uniform.sample(&mut thread_rng()) < pcfg.case_seq.exp()
+        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.case_seq.exp()
     {
         let case_rng =
             sw_info.interval.lower_bound()..=sw_info.interval.upper_bound();
-        let case_num = Uniform::from(case_rng).sample(&mut thread_rng());
+        let case_num = Uniform::from(case_rng).sample(&mut *rnd::get_rng());
         let case = AExpr::Num(case_num);
         let mut case_frame = ctx.child_frame();
         let case_block =
@@ -91,7 +93,7 @@ fn gen_try_catch<T: Pretty + StatementTy, P: StatementPCFG>(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> Block<T> {
-    let catch_type = distribs.type_idx.sample(&mut thread_rng());
+    let catch_type = distribs.type_idx.sample(&mut *rnd::get_rng());
     let (catch_name, catch_type, mut try_frame) = match catch_type {
         Type::INT_IDX => {
             (Some(ctx.new_var()), Type::Int, ctx.try_child(Type::Int))
@@ -143,7 +145,7 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
 ) -> Vec<Block<T>> {
     let mut res = vec![];
     while res.is_empty()
-        || distribs.uniform.sample(&mut thread_rng()) < pcfg.seq.exp()
+        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.seq.exp()
             && fuel > 0
             && (ctx.can_follow() || ctx.is_dead())
     {
@@ -178,7 +180,7 @@ pub(super) fn correct_loop_step(
     mut step_info: ExprInfo,
 ) -> (AExpr, ExprInfo) {
     assert_ne!(step_ty, StepType::None);
-    if step_ty == StepType::Inc && step_info.interval.contains_nonpositive() {
+    if step_ty == StepType::Inc && step_info.interval.contains_neg_or_zero() {
         let lower_bound = step_info.interval.lower_bound();
         let addend = lower_bound.saturating_abs();
         let inc = if -addend == lower_bound { 1 } else { 2 };
@@ -190,7 +192,7 @@ pub(super) fn correct_loop_step(
             + Interval::from_const(addend)
             + Interval::from_const(inc);
     } else if step_ty == StepType::Dec
-        && step_info.interval.contains_nonnegative()
+        && step_info.interval.contains_pos_or_zero()
     {
         let upper_bound = step_info.interval.upper_bound();
         let subtractend = upper_bound.saturating_abs();
@@ -325,17 +327,18 @@ fn is_invalid_loop_bounds(
     let max_iter = max_iter.try_into().unwrap();
     assert!(max_iter > 1);
     (step_ty == StepType::Inc
-        && (!step_info.interval.is_positive()
+        && (step_info.interval.contains_neg_or_zero()
             || get_loop_max_iters(init_info, limit_info, step_info, step_ty)
                 > max_iter))
         || (step_ty == StepType::Dec
-            && (!step_info.interval.is_negative()
+            && (step_info.interval.contains_pos_or_zero()
                 || get_loop_max_iters(
                     init_info, limit_info, step_info, step_ty,
                 ) > max_iter))
 }
 
 /// Generates the loop initializer, limiter, and step
+#[allow(clippy::too_many_lines)]
 fn gen_loop_init(
     loop_pcfg: &LoopPCFG,
     ctx: &mut Context,
@@ -384,6 +387,10 @@ fn gen_loop_init(
     let iter_range = get_iterator_range(step_ty, &init_info, &limit_info);
     let max_iters =
         get_loop_max_iters(&init_info, &limit_info, &step_info, step_ty);
+    assert!(
+        max_iters <= LOOP_MAX_ITER.try_into().unwrap()
+            && max_iters <= ctx.max_loop_iter().try_into().unwrap()
+    );
     LoopInit {
         init,
         iter_range,
@@ -447,7 +454,7 @@ fn gen_while_var<T: Pretty + StatementTy>(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> (Option<Block<T>>, String, Interval) {
-    if let Some(v) = ctx.get_mutable_avars().choose(&mut thread_rng()) {
+    if let Some(v) = ctx.get_mutable_avars().choose(&mut *rnd::get_rng()) {
         (None, v.clone(), ctx.get_avar_interval(v).unwrap())
     } else {
         let v = ctx.new_var();
@@ -620,7 +627,7 @@ fn gen_step_ty<P: StatementPCFG>(
     distribs: &mut Distribs,
     pcfg: &BlockPCFG<P>,
 ) -> StepType {
-    if distribs.uniform.sample(&mut thread_rng())
+    if distribs.uniform.sample(&mut *rnd::get_rng())
         < pcfg.loop_pcfg.inc_or_dec.exp()
     {
         StepType::Inc
@@ -641,7 +648,7 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
         return gen_block(pcfg, tp, ctx, distribs, funcs, fuel);
     }
     let step_ty = gen_step_ty(distribs, pcfg);
-    let do_while = distribs.uniform.sample(&mut thread_rng()) < 0.5;
+    let do_while = distribs.uniform.sample(&mut *rnd::get_rng()) < 0.5;
     let (init_block, var, var_interval) =
         gen_while_var(tp, ctx, distribs, funcs, fuel);
     let init_info = ExprInfo::from_interval(var_interval);
@@ -752,7 +759,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     let mut bodies = vec![];
     let mut frames = vec![];
     while (bodies.len() < 2 && sw_info.interval.len() > 3)
-        || distribs.uniform.sample(&mut thread_rng()) < pcfg.case_seq.exp()
+        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.case_seq.exp()
     {
         let mut body_frame = ctx.loop_child_frame(
             step_ty,
@@ -771,7 +778,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
             Uniform::from(
                 sw_info.interval.lower_bound()..=sw_info.interval.upper_bound(),
             )
-            .sample(&mut thread_rng()),
+            .sample(&mut *rnd::get_rng()),
         );
         bodies.push((case, body));
         frames.push(body_frame.stack_frame());
@@ -803,11 +810,11 @@ pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
     let mut idx = if fuel == 0 {
         Block::<Statement>::STMT_IDX
     } else {
-        distribs.block_idx.sample(&mut rand::thread_rng())
+        distribs.block_idx.sample(&mut *rnd::get_rng())
     };
     while ctx.is_dead() && idx == Block::<Statement>::DEAD_IDX {
         // No nested dead blocks
-        idx = distribs.block_idx.sample(&mut rand::thread_rng());
+        idx = distribs.block_idx.sample(&mut *rnd::get_rng());
     }
     match idx {
         Block::<Statement>::DEAD_IDX => vec![Block::Dead(gen_blocks(
@@ -826,9 +833,9 @@ pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
         Block::<Statement>::IF_IDX => {
             vec![gen_if(pcfg, tp, ctx, distribs, funcs, fuel)]
         }
-        // Block::<Statement>::SWITCH_IDX => {
-        //     vec![gen_switch(pcfg, tp, ctx, distribs, funcs, fuel)]
-        // }
+        Block::<Statement>::SWITCH_IDX => {
+            vec![gen_switch(pcfg, tp, ctx, distribs, funcs, fuel)]
+        }
         // Block::<Statement>::TRYCATCH_IDX => {
         //     vec![gen_try_catch(pcfg, tp, ctx, distribs, funcs, fuel)]
         // }

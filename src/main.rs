@@ -7,10 +7,15 @@ extern crate strum;
 extern crate support;
 use bril_rs::Program;
 use pcfg::*;
+
+use crate::generator::{rnd, FArg};
 mod generator;
 mod lowering;
 mod runner;
+#[macro_use]
+extern crate lazy_static;
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let pcfg = pcfg::TopPCFG::uniform();
     let args = vec![
@@ -21,7 +26,58 @@ fn main() {
         generator::FArg::bool("e"),
     ];
     for _ in 0..1 {
-        let prog = generator::gen_function(&pcfg, &args);
+        let prog = vec![bare_c::Block::<bare_c::Statement>::Switch {
+            guard: bare_c::AExpr::Add(
+                Box::new(bare_c::AExpr::Id("a".to_string())),
+                Box::new(bare_c::AExpr::Id("b".to_string())),
+            ),
+            cases: vec![
+                (
+                    bare_c::AExpr::Num(10),
+                    vec![bare_c::Block::Stmt(bare_c::Statement::Assign {
+                        dest: "a".to_string(),
+                        src: bare_c::Expr::AExpr(bare_c::AExpr::Num(10)),
+                    })],
+                ),
+                (
+                    bare_c::AExpr::Num(20),
+                    vec![bare_c::Block::If {
+                        guard: bare_c::BExpr::Eqa(
+                            Box::new(bare_c::AExpr::Id("a".to_string())),
+                            Box::new(bare_c::AExpr::Num(10)),
+                        ),
+                        then: vec![bare_c::Block::Stmt(
+                            bare_c::Statement::Assign {
+                                dest: "a".to_string(),
+                                src: bare_c::Expr::AExpr(bare_c::AExpr::Num(
+                                    20,
+                                )),
+                            },
+                        )],
+                        otherwise: vec![bare_c::Block::Stmt(
+                            bare_c::Statement::Assign {
+                                dest: "a".to_string(),
+                                src: bare_c::Expr::AExpr(bare_c::AExpr::Num(
+                                    30,
+                                )),
+                            },
+                        )],
+                    }],
+                ),
+            ],
+            default: vec![bare_c::Block::Stmt(bare_c::Statement::Assign {
+                dest: "a".to_string(),
+                src: bare_c::Expr::AExpr(bare_c::AExpr::Num(20)),
+            })],
+        }];
+        let test_args = vec![
+            FArg::int("a", -10, 20),
+            FArg::int("b", -20, 20),
+            FArg::int("c", 0, 100),
+            FArg::bool("d"),
+            FArg::bool("e"),
+        ];
+        let prog = generator::gen_function(&pcfg, &test_args);
         println!("{}", bare_c::display(&prog));
         println!("DONE");
         let prog = lowering::lower(prog);
@@ -69,7 +125,11 @@ fn to_prog(body: Vec<bril_rs::Code>) -> Program {
 mod test {
     use std::time::Duration;
 
-    use crate::{bare_c::display, generator::FArg, pcfg::PCFG};
+    use crate::{
+        bare_c::display,
+        generator::{rnd, FArg},
+        pcfg::PCFG,
+    };
 
     #[test]
     fn end_to_end() {
@@ -80,7 +140,8 @@ mod test {
             FArg::bool("d"),
             FArg::bool("e"),
         ];
-        for _ in 0..30 {
+        for _ in 0..100 {
+            rnd::reseed();
             let pcfg = crate::pcfg::TopPCFG::uniform();
             let brc_prog = crate::generator::gen_function(&pcfg, &test_args);
             let prog = crate::lowering::lower(brc_prog.clone());
@@ -91,11 +152,14 @@ mod test {
                 &prog_json,
                 None,
                 args.clone(),
-                Duration::from_secs(20),
+                Duration::from_secs(10),
+                true,
             );
             if output.is_err() {
                 std::fs::write("failed_test.bril", prog_json).unwrap();
-                eprintln!("Failed test with {output:?} and args {args:#?}");
+                let out = format!("Failed test with {output:?} and args {args:#?}\nFailed seed: {}\n", rnd::get_seed());
+                eprintln!("{out}");
+                std::fs::write("failed_log.txt", out).unwrap();
                 std::fs::write("failed_test.brc", display(&brc_prog)).unwrap();
             }
             assert!(output.is_ok());

@@ -1,12 +1,12 @@
 use rand::Rng;
 use std::{
     io::Read,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
 };
 use std::{io::Write, time::Duration};
 use wait_timeout::ChildExt;
 
-use crate::generator::FArg;
+use crate::generator::{rnd, FArg};
 
 /// A command line compiler stage
 #[derive(Debug, Clone)]
@@ -18,10 +18,28 @@ pub struct CompilerStage {
 /// An error that can occur while running a program
 #[derive(Debug)]
 pub enum RunnerError {
+    /// Compiler stage timed out
     Timeout(String),
+    /// Error waiting for result from a compiler stage
     WaitingError(String, String),
+    /// Error converting final output to string
     Utf8Conversion(String),
+    /// Nonzero error code from a compiler stage
     StageError(i32, String),
+}
+
+/// Reads the stdout from the child process into `buf`.
+/// Returns a string representation of the output.
+fn read_stdout(
+    child: &mut Child,
+    buf: &mut Vec<u8>,
+    error_msg: &str,
+) -> Result<String, RunnerError> {
+    let stdout = child.stdout.as_mut().unwrap();
+    buf.clear();
+    stdout.read_to_end(buf).unwrap();
+    String::from_utf8(buf.clone())
+        .map_err(|e| RunnerError::Utf8Conversion(format!("{error_msg}: {e}")))
 }
 
 /// Runs a program through the `brili` interpreter, returning the output.
@@ -40,6 +58,7 @@ pub fn run_prog(
     pipeline: Option<&[CompilerStage]>,
     brili_args: Vec<String>,
     timeout: Duration,
+    enable_retries: bool,
 ) -> Result<String, RunnerError> {
     let mut buf = prog_json.as_bytes().to_owned();
     let mut processes = vec![];
@@ -58,11 +77,31 @@ pub fn run_prog(
         processes.push(process);
         stage_names.push(stage.cmd.clone());
     }
-    for (mut stage, name) in processes.into_iter().zip(stage_names.into_iter())
-    {
-        let mut child = stage.spawn().expect("Failed to spawn process");
+    for (stage, name) in processes.into_iter().zip(stage_names.into_iter()) {
+        run_stage_with_retries(&mut buf, stage, name, timeout, enable_retries)?;
+    }
+    String::from_utf8(buf)
+        .map_err(|e| RunnerError::Utf8Conversion(format!("{e}")))
+}
+
+/// Runs the command `stage`, reading stdin from `buf` and writing stdout to `buf`.
+/// If a timeout occurs and `enable_retries` is true, the stage will be retried once.
+fn run_stage_with_retries(
+    buf: &mut Vec<u8>,
+    mut stage: Command,
+    name: String,
+    timeout: Duration,
+    enable_retries: bool,
+) -> Result<(), RunnerError> {
+    // we allow retries bc there seems to be a thing where a timeout occurs
+    // spuriously
+    let mut retry = false;
+    loop {
+        let mut child = stage
+            .spawn()
+            .unwrap_or_else(|_| panic!("Failed to spawn {name}"));
         let stdin = child.stdin.as_mut().unwrap();
-        stdin.write_all(&buf).unwrap();
+        stdin.write_all(buf).unwrap();
         match child.wait_timeout(timeout) {
             Ok(Some(status)) if status.code() == Some(0) => (),
             Ok(Some(status)) => {
@@ -73,6 +112,10 @@ pub fn run_prog(
             }
             Ok(None) => {
                 child.kill().unwrap();
+                if !retry && enable_retries {
+                    retry = true;
+                    continue;
+                }
                 return Err(RunnerError::Timeout(name));
             }
             Err(e) => {
@@ -81,10 +124,10 @@ pub fn run_prog(
         }
         let stdout = child.stdout.as_mut().unwrap();
         buf.clear();
-        stdout.read_to_end(&mut buf).unwrap();
+        stdout.read_to_end(buf).unwrap();
+        break;
     }
-    String::from_utf8(buf)
-        .map_err(|e| RunnerError::Utf8Conversion(format!("{e}")))
+    Ok(())
 }
 
 /// Generates a set of arguments for a program based on the
@@ -93,7 +136,7 @@ pub fn run_prog(
 /// A vector of strings representing the arguments to pass to the program
 /// in the same order as `args`.
 pub fn gen_main_args(args: &[FArg]) -> Vec<String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rnd::get_rng();
     args.iter()
         .map(|arg| match arg {
             FArg::Int { interval, .. } => {

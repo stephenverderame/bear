@@ -3,7 +3,7 @@ use rand::prelude::Distribution;
 use rand::Rng;
 
 use super::interval::Interval;
-use super::{ExprInfo, StepType, Type};
+use super::{rnd, ExprInfo, StepType, Type};
 use crate::bare_c::{AExpr, BExpr, StmtBlock};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -75,8 +75,15 @@ impl AnalysisFacts {
         }
         let mut to_remove = Vec::new();
         for k in self.available_aexprs.keys() {
-            if !child.available_aexprs.contains_key(k) {
-                to_remove.push(k.clone());
+            match child.available_aexprs.get(k) {
+                Some(available) => {
+                    if self.available_aexprs[k] != *available {
+                        to_remove.push(k.clone());
+                    }
+                }
+                None => {
+                    to_remove.push(k.clone());
+                }
             }
         }
         for k in to_remove {
@@ -84,8 +91,15 @@ impl AnalysisFacts {
         }
         let mut to_remove = Vec::new();
         for k in self.available_bexprs.keys() {
-            if !child.available_bexprs.contains_key(k) {
-                to_remove.push(k.clone());
+            match child.available_bexprs.get(k) {
+                Some(available) => {
+                    if self.available_bexprs[k] != *available {
+                        to_remove.push(k.clone());
+                    }
+                }
+                None => {
+                    to_remove.push(k.clone());
+                }
             }
         }
         for k in to_remove {
@@ -177,7 +191,7 @@ impl StackFrame {
             .chain(self.facts.bvars.iter())
             .filter(|&x| !self.facts.pinned.contains(x))
         {
-            if rand::thread_rng().gen_range(0_f64..1_f64) < pin_prob.exp() {
+            if rnd::get_rng().gen_range(0_f64..1_f64) < pin_prob.exp() {
                 c.facts.pinned.insert(nm.clone());
             } else {
                 break;
@@ -442,11 +456,14 @@ impl<'a> Context<'a> {
 
     /// Returns a unique variable name
     pub(super) fn new_var(&self) -> String {
-        let mut rng = rand::thread_rng();
-        let mut name: String = std::iter::repeat(())
-            .map(|()| rng.sample(Alphanumeric))
-            .map(char::from)
-            .take(7)
+        let mut rng = rnd::get_rng();
+        let mut name: String = std::iter::once('v')
+            .chain(
+                std::iter::repeat(())
+                    .map(|()| rng.sample(Alphanumeric))
+                    .map(char::from)
+                    .take(6),
+            )
             .collect();
         let mut i = 0;
         while self.cur.facts.avars.contains_key(&name)
@@ -484,7 +501,7 @@ impl<'a> Context<'a> {
         if self.cur.nests.nested_trys.is_empty() {
             return None;
         }
-        let idx = (distrib.sample(&mut rand::thread_rng())
+        let idx = (distrib.sample(&mut *rnd::get_rng())
             * self.cur.nests.nested_trys.len() as f64)
             as usize;
         Some((idx, self.cur.nests.nested_trys[idx]))
@@ -592,7 +609,7 @@ impl<'a> Context<'a> {
             .filter(|&x| self.cur.facts.avars.contains_key(x))
             .cloned()
             .collect::<Vec<_>>()
-            .choose(&mut rand::thread_rng())
+            .choose(&mut *rnd::get_rng())
             .cloned()
     }
 

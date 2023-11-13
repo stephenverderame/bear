@@ -52,10 +52,12 @@ impl Interval {
     }
 
     pub const fn lower_bound(&self) -> i64 {
+        assert!(self.max >= self.min);
         self.min
     }
 
     pub const fn upper_bound(&self) -> i64 {
+        assert!(self.max >= self.min);
         self.max
     }
 
@@ -89,13 +91,13 @@ impl Interval {
     }
 
     /// Returns true if the interval contains negative numbers or zero
-    pub const fn contains_nonpositive(&self) -> bool {
+    pub const fn contains_neg_or_zero(&self) -> bool {
         assert!(self.max >= self.min);
         self.min <= 0
     }
 
     /// Returns true if the interval contains positive numbers or zero
-    pub const fn contains_nonnegative(&self) -> bool {
+    pub const fn contains_pos_or_zero(&self) -> bool {
         assert!(self.max >= self.min);
         self.max >= 0
     }
@@ -171,8 +173,8 @@ mod test {
         let d = 30;
         let i = Interval::new(a, b);
         let j = Interval::new(c, d);
-        assert_eq!(i + j, Interval::new(a + c, b + d));
-        assert_eq!(i - j, Interval::new(a - d, b - c));
+        assert_eq!(i + j, Interval::new(-20, 130));
+        assert_eq!(i - j, Interval::new(-30, 120));
         assert_eq!(i * j, Interval::new(-2000, 3000));
         assert_eq!(i / j, Interval::new(-5, 3));
     }

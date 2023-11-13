@@ -236,6 +236,125 @@ fn lower_for(
     r
 }
 
+/// Generates blocks for branches which test whether the guard is equal to
+/// each of the case guards.
+///
+/// Each branch has a hole set for the `true` side of the branch CFG edge which
+/// must be filled in by the caller. The next block created should be the default
+/// body block since the last branch will fallthrough to it.
+fn switch_case_test_block(
+    case_guards: Vec<AExpr>,
+    guard_name: &str,
+    mut r: LowerResult,
+) -> (LowerResult, Vec<usize>) {
+    let mut case_test_start_blocks = vec![];
+    for guard_val in case_guards {
+        let val_name;
+        (r, val_name) = add_instrs_to_result(
+            flatten_aexpr(guard_val, FlattenResult::new(r.cur_temp_id)),
+            r,
+        );
+        let cmp_res = r.fresh_temp();
+        r = add_instr_to_cur_block(
+            Instruction::Value {
+                args: vec![guard_name.to_string(), val_name.unwrap()],
+                dest: cmp_res.clone(),
+                funcs: vec![],
+                labels: vec![],
+                op: ValueOps::Eq,
+                op_type: Type::Bool,
+                pos: None,
+            },
+            r,
+        );
+        r.cur_block.terminator = Some((
+            r.cfg.next_instr_id,
+            branch_instr(cmp_res, CFG_HOLE_ID, r.cur_block_id + 1),
+        ));
+        r.cfg.next_instr_id += 1;
+        r.cfg.adj_lst.insert(
+            r.cur_block_id,
+            CfgEdgeTo::Branch {
+                true_node: CFG_HOLE_ID,
+                false_node: r.cur_block_id + 1,
+            },
+        );
+        case_test_start_blocks.push(r.cur_block_id);
+        r = r.finish_block(false);
+    }
+    (r, case_test_start_blocks)
+}
+
+/// Generates the blocks for the body of each case in a switch statement.
+/// If `fallthrough` is true, then the last block will fallthrough to the next
+/// case. Otherwise, terminal blocks of each case will be pushed to the pending
+/// block stack.
+fn switch_body_blocks<S: StatementTy + Pretty>(
+    case_blocks: Vec<Vec<Block<S>>>,
+    fallthrough: bool,
+    mut r: LowerResult,
+) -> (LowerResult, Vec<usize>) {
+    let mut body_start_blocks = vec![];
+    for case_block in case_blocks {
+        body_start_blocks.push(r.cur_block_id);
+        r = lower_blocks(case_block, r).finish_block(true);
+        if fallthrough {
+            if let PendingBlockEntry::Block(body_end_block) =
+                r.pending_block_stack.pop().unwrap()
+            {
+                r.cfg
+                    .adj_lst
+                    .insert(body_end_block, CfgEdgeTo::Next(r.cur_block_id));
+            } else {
+                panic!("expected block")
+            }
+        }
+    }
+    (r, body_start_blocks)
+}
+
+fn lower_switch<S: StatementTy + Pretty>(
+    guard: AExpr,
+    cases: Vec<(AExpr, Vec<Block<S>>)>,
+    default: Vec<Block<S>>,
+    fallthrough: bool,
+    mut r: LowerResult,
+) -> LowerResult {
+    let (case_guards, case_blocks): (Vec<_>, Vec<_>) =
+        cases.into_iter().unzip();
+    let guard_name;
+    (r, guard_name) = add_instrs_to_result(
+        flatten_aexpr(guard, FlattenResult::new(r.cur_temp_id)),
+        r,
+    );
+    let guard_name = guard_name.unwrap();
+    let case_test_start_blocks;
+    (r, case_test_start_blocks) =
+        switch_case_test_block(case_guards, &guard_name, r);
+    // default case so that this is the fallthrough of the last branch
+    r.pending_block_stack.push(PendingBlockEntry::Delim);
+    r = lower_blocks(default, r).finish_block(true);
+    let body_start_blocks;
+    (r, body_start_blocks) = switch_body_blocks(case_blocks, fallthrough, r);
+    r = r.connect_next_block();
+    for (guard_id, body_id) in
+        case_test_start_blocks.into_iter().zip(body_start_blocks)
+    {
+        if let Some(CfgEdgeTo::Branch {
+            true_node,
+            false_node,
+        }) = r.cfg.adj_lst.get_mut(&guard_id)
+        {
+            assert_eq!(*true_node, CFG_HOLE_ID);
+            *true_node = body_id;
+            assert_ne!(*false_node, CFG_HOLE_ID);
+        } else {
+            panic!("expected branch")
+        }
+    }
+    r
+}
+
 #[must_use]
 pub(super) fn lower_block<S: StatementTy + Pretty>(
     b: Block<S>,
@@ -257,6 +376,11 @@ pub(super) fn lower_block<S: StatementTy + Pretty>(
             body,
             is_inc,
         } => lower_for(&var, init, limit, step, body, is_inc, r),
+        Block::Switch {
+            guard,
+            cases,
+            default,
+        } => lower_switch(guard, cases, default, false, r),
         _ => todo!(),
     }
 }
