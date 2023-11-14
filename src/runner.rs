@@ -95,6 +95,9 @@ fn run_stage_with_retries(
 ) -> Result<(), RunnerError> {
     // we allow retries bc there seems to be a thing where a timeout occurs
     // spuriously
+
+    // I realized this is bc the process hangs if its output pipe gets filled
+    // (default pipe buffer is 16 pages or 65,536 bytes)
     let mut retry = false;
     loop {
         let mut child = stage

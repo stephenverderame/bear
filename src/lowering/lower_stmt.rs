@@ -111,6 +111,11 @@ fn lower_print(arg_exprs: Vec<Expr>, mut res: LowerResult) -> LowerResult {
 }
 
 /// Lowers a Bare C throw into a BRIL instruction sequence.
+/// # Arguments
+/// * `n` - The number of catch blocks to go up in the stack. This is the reverse
+/// index of the catch point in the catch blocks stack
+/// * `e` - The expression to throw, or `None` to throw no value
+/// * `res` - The current `LowerResult`
 fn lower_throw(n: usize, e: Option<Expr>, mut res: LowerResult) -> LowerResult {
     if let Some(e) = e {
         let op_type = expr_type(&e);

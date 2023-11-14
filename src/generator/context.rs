@@ -140,6 +140,17 @@ pub(super) struct StackLevel {
     nested_trys: Vec<Type>,
 }
 
+impl StackLevel {
+    /// Meets the nesting levels of two siblings
+    fn sibling_meet(mut self, other: Self) -> Self {
+        let try_len = self.nested_trys.len().min(other.nested_trys.len());
+        self.nested_trys.truncate(try_len);
+        assert_eq!(self.nested_trys, other.nested_trys);
+        assert_eq!(self.nested_loops, other.nested_loops);
+        self
+    }
+}
+
 impl StackFrame {
     fn new_child(&self) -> Self {
         Self {
@@ -228,7 +239,7 @@ impl StackFrame {
         // we pass by value so we consume the stack frame which prevents
         // us from accidentally meeting and then mutating the same stack frame
         Self {
-            nests: self.nests,
+            nests: self.nests.sibling_meet(other.nests),
             facts: AnalysisFacts::meet(self.facts, &other.facts),
             pending_step: match (self.pending_step, other.pending_step) {
                 (StepType::Inc, StepType::Dec)
@@ -487,7 +498,9 @@ impl<'a> Context<'a> {
         }
     }
 
-    /// Returns a random catch point and the type of value expected to be caught
+    /// Returns a random catch point and the type of value expected to be caught.
+    /// The catch point is how many try-catch blocks to go up the stack, so its
+    /// the reverse index of the catch point in the `nested_trys` vector.
     /// Returns None if there are no catch points
     #[allow(
         clippy::cast_possible_truncation,
@@ -504,7 +517,10 @@ impl<'a> Context<'a> {
         let idx = (distrib.sample(&mut *rnd::get_rng())
             * self.cur.nests.nested_trys.len() as f64)
             as usize;
-        Some((idx, self.cur.nests.nested_trys[idx]))
+        Some((
+            self.cur.nests.nested_trys.len() - 1 - idx,
+            self.cur.nests.nested_trys[idx],
+        ))
     }
 
     /// Returns the current loop depth
@@ -536,6 +552,11 @@ impl<'a> Context<'a> {
     pub(super) fn update(&mut self, mut other: StackFrame) {
         other.nests = self.cur.nests.clone();
         self.cur = other;
+    }
+
+    /// Updates the current context with information from a child
+    pub(super) fn update_from_child(&mut self, child: &StackFrame) {
+        self.cur.update_from_child(child);
     }
 
     /// Updates the current context with information from a child

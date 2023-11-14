@@ -159,7 +159,9 @@ pub enum Statement {
     },
     Ret(Option<Expr>),
     /// A throw statement with the number of nested try-catch blocks to throw out of
-    /// and the value to throw
+    /// and the value to throw. That is, `Throw(0, ..)` throws out of the innermost
+    /// try-catch block, `Throw(1, ..)` throws out of the next innermost try-catch
+    /// block, and so on.
     Throw(usize, Option<Expr>),
     PCall(String, Vec<Expr>),
     Print(Vec<Expr>),
@@ -358,9 +360,10 @@ impl<T: Pretty> Block<T> {
             res += &format!("{}\n", stmt.pretty(indent + 2));
         }
         res += &format!(
-            "{}}} for {} {op} {} by {};\n",
+            "{}}} for {} in {} {op} {} by {};\n",
             self.indent(indent + 1),
             df.var,
+            df.init.pretty(indent + 1),
             df.limit.pretty(indent + 1),
             df.step.pretty(indent + 1),
         );

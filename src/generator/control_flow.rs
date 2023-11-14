@@ -16,7 +16,7 @@ use super::{
     Distribs, ExprInfo, StepType, Type, EXPR_FUEL,
 };
 
-const LOOP_EXPR_FUEL: usize = 4;
+const LOOP_EXPR_FUEL: usize = 3;
 const LOOP_STEP_FUEL: usize = 2;
 
 /// Generates an if statement
@@ -737,6 +737,7 @@ fn gen_duffs_default_and_update_ctx<
     let default =
         gen_blocks(pcfg, tp, &mut default_frame, distribs, funcs, fuel - 1);
     let mut sf = default_frame.stack_frame();
+    let default_only = frames.len();
     for frame in frames {
         sf = sf.meet(frame);
     }
@@ -836,18 +837,18 @@ pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
         Block::<Statement>::SWITCH_IDX => {
             vec![gen_switch(pcfg, tp, ctx, distribs, funcs, fuel)]
         }
-        // Block::<Statement>::TRYCATCH_IDX => {
-        //     vec![gen_try_catch(pcfg, tp, ctx, distribs, funcs, fuel)]
-        // }
+        Block::<Statement>::TRYCATCH_IDX => {
+            vec![gen_try_catch(pcfg, tp, ctx, distribs, funcs, fuel)]
+        }
         Block::<Statement>::FOR_IDX if ctx.max_loop_iter() > 10 => {
             vec![gen_for(pcfg, tp, ctx, distribs, funcs, fuel)]
         }
         // Block::<Statement>::WHILE_IDX => {
         //     gen_while(pcfg, tp, ctx, distribs, funcs, fuel)
         // }
-        // Block::<Statement>::DUFFS_IDX => {
-        //     vec![gen_duffs(pcfg, tp, ctx, distribs, funcs, fuel)]
-        // }
+        Block::<Statement>::DUFFS_IDX if ctx.max_loop_iter() > 2 => {
+            vec![gen_duffs(pcfg, tp, ctx, distribs, funcs, fuel)]
+        }
         _ => gen_block(pcfg, tp, ctx, distribs, funcs, fuel),
         // _ => unreachable!(),
     }

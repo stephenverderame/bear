@@ -2,7 +2,7 @@ use bril_rs::{EffectOps, Instruction, Type, ValueOps};
 use cfg::{CfgEdgeTo, CfgNode};
 
 use crate::{
-    bare_c::{AExpr, BExpr, Block, LoopStatement, Pretty},
+    bare_c::{AExpr, BExpr, Block, DuffsInfo, LoopStatement, Pretty},
     generator::StatementTy,
     lowering::flattening::{flatten_bexpr, FlattenResult},
 };
@@ -31,6 +31,8 @@ fn branch_instr(
     }
 }
 
+/// Lower's an if. The returned `LowerResult`'s current block is the block
+/// immediately after the if.
 #[must_use]
 fn lower_if<S: StatementTy + Pretty>(
     guard: BExpr,
@@ -182,6 +184,8 @@ fn lower_step(
     (step_id, r.finish_block(false))
 }
 
+/// Lowers a for loop. The returned `LowerResult`'s current block is the block
+/// immediately following the for loop.
 fn lower_for(
     var: &str,
     init: AExpr,
@@ -287,24 +291,33 @@ fn switch_case_test_block(
 
 /// Generates the blocks for the body of each case in a switch statement.
 /// If `fallthrough` is true, then the last block will fallthrough to the next
-/// case. Otherwise, terminal blocks of each case will be pushed to the pending
+/// case and the final block will fallthrough to `default_block`.
+/// Otherwise, terminal blocks of each case will be pushed to the pending
 /// block stack.
 fn switch_body_blocks<S: StatementTy + Pretty>(
     case_blocks: Vec<Vec<Block<S>>>,
     fallthrough: bool,
+    default_block: usize,
     mut r: LowerResult,
 ) -> (LowerResult, Vec<usize>) {
     let mut body_start_blocks = vec![];
-    for case_block in case_blocks {
+    let num_blocks = case_blocks.len();
+    for (i, case_block) in case_blocks.into_iter().enumerate() {
         body_start_blocks.push(r.cur_block_id);
         r = lower_blocks(case_block, r).finish_block(true);
         if fallthrough {
             if let PendingBlockEntry::Block(body_end_block) =
                 r.pending_block_stack.pop().unwrap()
             {
+                let fallthrough_block = if i == num_blocks - 1 {
+                    // last fallthrough goes to the default block
+                    default_block
+                } else {
+                    r.cur_block_id
+                };
                 r.cfg
                     .adj_lst
-                    .insert(body_end_block, CfgEdgeTo::Next(r.cur_block_id));
+                    .insert(body_end_block, CfgEdgeTo::Next(fallthrough_block));
             } else {
                 panic!("expected block")
             }
@@ -313,13 +326,18 @@ fn switch_body_blocks<S: StatementTy + Pretty>(
     (r, body_start_blocks)
 }
 
+/// Lowers a switch statement and returns the lower result, id of the first block
+/// in the series of case body blocks, and the last guard block id.
+///
+/// After this function is called, the resulting `LowerResult`'s current block
+/// is the block immediately following the switch
 fn lower_switch<S: StatementTy + Pretty>(
     guard: AExpr,
     cases: Vec<(AExpr, Vec<Block<S>>)>,
     default: Vec<Block<S>>,
     fallthrough: bool,
     mut r: LowerResult,
-) -> LowerResult {
+) -> (LowerResult, usize) {
     let (case_guards, case_blocks): (Vec<_>, Vec<_>) =
         cases.into_iter().unzip();
     let guard_name;
@@ -333,10 +351,14 @@ fn lower_switch<S: StatementTy + Pretty>(
         switch_case_test_block(case_guards, &guard_name, r);
     // default case so that this is the fallthrough of the last branch
     r.pending_block_stack.push(PendingBlockEntry::Delim);
+    let default_block = r.cur_block_id;
     r = lower_blocks(default, r).finish_block(true);
     let body_start_blocks;
-    (r, body_start_blocks) = switch_body_blocks(case_blocks, fallthrough, r);
+    (r, body_start_blocks) =
+        switch_body_blocks(case_blocks, fallthrough, default_block, r);
     r = r.connect_next_block();
+    let cases_start_block =
+        body_start_blocks.first().copied().unwrap_or(default_block);
     for (guard_id, body_id) in
         case_test_start_blocks.into_iter().zip(body_start_blocks)
     {
@@ -352,6 +374,82 @@ fn lower_switch<S: StatementTy + Pretty>(
             panic!("expected branch")
         }
     }
+    (r, cases_start_block)
+}
+
+/// Lowers Duff's Device into BRIL. The returned `LowerResult`'s current
+/// block is the block immediately after Duff's Device.
+fn lower_duffs(info: DuffsInfo, mut r: LowerResult) -> LowerResult {
+    // preheader/start
+    let preheader_id;
+    (preheader_id, r) = lower_preheader(&info.var, info.init, r);
+    let step_block;
+    (step_block, r) = lower_step(&info.var, info.step, r);
+    let break_block = r.cur_block_id;
+    r = r.finish_block(false);
+
+    r.break_blocks.push(break_block);
+    r.continue_blocks.push(step_block);
+    let body_start_id;
+    let test_start_id = r.cur_block_id;
+    (r, body_start_id) =
+        lower_switch(info.guard, info.bodies, info.default, true, r);
+    r.break_blocks.pop();
+    r.continue_blocks.pop();
+    let end_switch_id = r.cur_block_id;
+    r.cfg
+        .adj_lst
+        .insert(end_switch_id, CfgEdgeTo::Next(step_block));
+    r = r.finish_block(false);
+
+    r.cfg
+        .adj_lst
+        .insert(preheader_id, CfgEdgeTo::Next(test_start_id));
+
+    // step -> header
+    let header_id;
+    (header_id, r) = lower_header(&info.var, info.limit, info.is_inc, r);
+    r.cfg.adj_lst.insert(step_block, CfgEdgeTo::Next(header_id));
+    r.cfg.adj_lst.insert(
+        header_id,
+        CfgEdgeTo::Branch {
+            true_node: body_start_id,
+            false_node: break_block,
+        },
+    );
+
+    let final_block_id = r.cur_block_id;
+    r.cfg
+        .adj_lst
+        .insert(break_block, CfgEdgeTo::Next(final_block_id));
+    r
+}
+
+/// Lowers a try-catch block. The returned `LowerResult`'s current block is the
+/// block immediately after the try-catch.
+fn lower_try_catch<S: StatementTy + Pretty>(
+    try_block: Vec<Block<S>>,
+    catch_block: Vec<Block<S>>,
+    catch_name: Option<String>,
+    mut r: LowerResult,
+) -> LowerResult {
+    let try_start_id = r.cur_block_id;
+    r = r.finish_block(false);
+
+    let catch_start_id = r.cur_block_id;
+    r.pending_block_stack.push(PendingBlockEntry::Delim);
+    r = lower_blocks(catch_block, r).finish_block(true);
+
+    // try block
+    r.catch_blocks.push((catch_name, catch_start_id));
+    let try_block_start_id = r.cur_block_id;
+    r = lower_blocks(try_block, r).finish_block(true);
+    r.catch_blocks.pop();
+
+    r = r.connect_next_block();
+    r.cfg
+        .adj_lst
+        .insert(try_start_id, CfgEdgeTo::Next(try_block_start_id));
     r
 }
 
@@ -380,8 +478,14 @@ pub(super) fn lower_block<S: StatementTy + Pretty>(
             guard,
             cases,
             default,
-        } => lower_switch(guard, cases, default, false, r),
-        _ => todo!(),
+        } => lower_switch(guard, cases, default, false, r).0,
+        Block::Duffs(info) => lower_duffs(info, r),
+        Block::TryCatch {
+            try_block,
+            catch_block,
+            catch_name,
+        } => lower_try_catch(try_block, catch_block, catch_name, r),
+        Block::While { .. } => todo!(),
     }
 }
 

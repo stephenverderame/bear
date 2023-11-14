@@ -23,10 +23,10 @@ use crate::{bare_c::AExpr, pcfg::TopPCFG};
 use self::context::Context;
 pub use self::stmt::{StatementEnum, StatementTy};
 
-const EXPR_FUEL: usize = 5;
-const STMT_FUEL: usize = 2;
+const EXPR_FUEL: usize = 4;
+const STMT_FUEL: usize = 3;
 /// Maximum total amount of loop iteration a loop nest can have
-const LOOP_MAX_ITER: u64 = 100_000;
+const LOOP_MAX_ITER: u64 = 8_000;
 
 /// Bare C types
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
