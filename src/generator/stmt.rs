@@ -46,6 +46,7 @@ fn gen_assign<P: StatementPCFG>(
         let (expr, expr_info) =
             gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
         if expr_info.vars.contains(&var) && ctx.loop_depth() != 0 {
+            ctx.kill_available_exprs(&var, typ);
             // mutation in a loop
             // for now, just make it unknown
             ctx.new_avar(&var, &ExprInfo::make_unknown());

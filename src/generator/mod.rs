@@ -310,20 +310,6 @@ pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
     )
 }
 
-pub fn gen_single_stmt(pcfg: &TopPCFG) -> Statement {
-    match stmt::gen_stmt(
-        &pcfg.block.stmt,
-        &pcfg.expr,
-        &mut Context::make_root(),
-        &mut Distribs::new(pcfg),
-        &mut FuncList::new(),
-        None,
-    ) {
-        StatementEnum::Statement(stmt) => stmt,
-        StatementEnum::LoopStmt(..) => unreachable!(),
-    }
-}
-
 #[cfg(test)]
 mod test {
     use crate::pcfg::PCFG;

@@ -158,6 +158,8 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
 struct LoopInit {
     /// The loop initializer
     init: AExpr,
+    /// The interval of the loop initializer
+    init_info: ExprInfo,
     /// The interval of values the loop counter could take on
     iter_range: Interval,
     /// The loop counter limit
@@ -393,6 +395,7 @@ fn gen_loop_init(
     );
     LoopInit {
         init,
+        init_info,
         iter_range,
         limit,
         limit_info,
@@ -733,11 +736,16 @@ fn gen_duffs_default_and_update_ctx<
     default_frame.pin_vars(&init.limit_info.vars);
     default_frame.pin_vars(&[var.to_string()]);
     default_frame.pin_vars(&sw_info.vars);
-    default_frame.new_avar(var, &ExprInfo::from(init.iter_range));
+    // we can skip the first guard, so every possible initial value must be considered
+    default_frame.new_avar(
+        var,
+        &ExprInfo::from_interval(
+            init.init_info.interval.union(init.limit_info.interval),
+        ),
+    );
     let default =
         gen_blocks(pcfg, tp, &mut default_frame, distribs, funcs, fuel - 1);
     let mut sf = default_frame.stack_frame();
-    let default_only = frames.len();
     for frame in frames {
         sf = sf.meet(frame);
     }
@@ -772,7 +780,13 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
         body_frame.pin_vars(&init.limit_info.vars);
         body_frame.pin_vars(&[var.clone()]);
         body_frame.pin_vars(&sw_info.vars);
-        body_frame.new_avar(&var, &ExprInfo::from(init.iter_range));
+        // we can skip the first guard, so every possible initial value must be considered
+        body_frame.new_avar(
+            &var,
+            &ExprInfo::from(
+                init.init_info.interval.union(init.limit_info.interval),
+            ),
+        );
         let body =
             gen_blocks(pcfg, tp, &mut body_frame, distribs, funcs, fuel - 1);
         let case = AExpr::Num(

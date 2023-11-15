@@ -6,9 +6,9 @@ mod pcfg;
 extern crate strum;
 extern crate support;
 use bril_rs::Program;
+use generator::FArg;
 use pcfg::*;
 
-use crate::generator::FArg;
 mod generator;
 mod lowering;
 mod runner;
@@ -21,43 +21,14 @@ mod test;
 fn main() {
     let pcfg = pcfg::TopPCFG::uniform();
     let args = vec![
-        generator::FArg::int("a", 0, 100),
-        generator::FArg::int("b", -50, 50),
-        generator::FArg::int("c", 0, 100),
-        generator::FArg::bool("d"),
-        generator::FArg::bool("e"),
+        FArg::int("a", 0, 100),
+        FArg::int("b", -50, 50),
+        FArg::int("c", 0, 100),
+        FArg::bool("d"),
+        FArg::bool("e"),
     ];
     for _ in 0..1 {
-        //let prog = generator::gen_function(&pcfg, &args);
-        let prog = vec![
-            bare_c::Block::Stmt(bare_c::Statement::Print(vec![
-                bare_c::Expr::AExpr(bare_c::AExpr::Id(String::from("c"))),
-            ])),
-            bare_c::Block::TryCatch {
-                try_block: vec![
-                    bare_c::Block::Stmt(bare_c::Statement::Throw(
-                        0,
-                        Some(bare_c::Expr::AExpr(bare_c::AExpr::Id(
-                            String::from("b"),
-                        ))),
-                    )),
-                    bare_c::Block::Stmt(bare_c::Statement::Print(vec![
-                        bare_c::Expr::AExpr(bare_c::AExpr::Id(String::from(
-                            "a",
-                        ))),
-                    ])),
-                ],
-                catch_block: vec![bare_c::Block::Stmt(
-                    bare_c::Statement::Print(vec![bare_c::Expr::AExpr(
-                        bare_c::AExpr::Id(String::from("foo")),
-                    )]),
-                )],
-                catch_name: Some(String::from("foo")),
-            },
-            bare_c::Block::Stmt(bare_c::Statement::Print(vec![
-                bare_c::Expr::BExpr(bare_c::BExpr::Id(String::from("d"))),
-            ])),
-        ];
+        let prog = generator::gen_function(&pcfg, &args);
         println!("{}", bare_c::display(&prog));
         println!("DONE");
         let prog = lowering::lower(prog);

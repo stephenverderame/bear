@@ -7,7 +7,6 @@ use super::{rnd, ExprInfo, StepType, Type};
 use crate::bare_c::{AExpr, BExpr, StmtBlock};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::slice::Chunks;
 
 /// Dataflow analysis facts for a dataflow analysis that is computed as
 /// we are generating the program
@@ -142,6 +141,7 @@ pub(super) struct StackLevel {
 
 impl StackLevel {
     /// Meets the nesting levels of two siblings
+    #[allow(clippy::needless_pass_by_value)]
     fn sibling_meet(mut self, other: Self) -> Self {
         let try_len = self.nested_trys.len().min(other.nested_trys.len());
         self.nested_trys.truncate(try_len);
@@ -216,6 +216,8 @@ impl StackFrame {
         c
     }
 
+    /// Returns a child stackframe which does not have information about any
+    /// variables which are not pinned.
     fn loop_inv_ctx(&self) -> Self {
         let mut c = self.new_child();
         c.facts.avars.retain(|k, _| self.facts.pinned.contains(k));
@@ -621,6 +623,8 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// Gets a random loop variable of any of the loops we are
+    /// currently nested in.
     pub(super) fn get_rand_loop_var(&self) -> Option<String> {
         use rand::seq::SliceRandom;
         self.cur
@@ -646,6 +650,7 @@ impl<'a> Context<'a> {
         self.cur.nests.nested_loops.last().cloned()
     }
 
+    /// Indicates that a loop step has been generated
     pub(super) fn set_step(&mut self) {
         self.cur.pending_step = StepType::None;
     }
