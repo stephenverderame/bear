@@ -31,7 +31,7 @@ fn end_to_end() {
             None,
             args.clone(),
             Duration::from_secs(15),
-            false,
+            "out/test_end_to_end",
         );
         if output.is_err() {
             std::fs::write("failed_test.bril", prog_json).unwrap();
@@ -129,10 +129,10 @@ fn lower_duffs() {
             String::from("false"),
         ],
         Duration::from_secs(3),
-        false,
+        "out/test_duffs",
     )
     .unwrap();
-    assert_eq!(res, String::from("6\n11\n-5\n6\n21\n-5\n6\n31\n"));
+    assert_eq!(res.stdout, String::from("6\n11\n-5\n6\n21\n-5\n6\n31\n"));
     let res = runner::run_prog(
         &json,
         None,
@@ -144,10 +144,13 @@ fn lower_duffs() {
             String::from("true"),
         ],
         Duration::from_secs(3),
-        false,
+        "out/test_duffs2",
     )
     .unwrap();
-    assert_eq!(res, String::from("11\n3\n11\n11\n3\n11\n11\n3\n11\n39\n"));
+    assert_eq!(
+        res.stdout,
+        String::from("11\n3\n11\n11\n3\n11\n11\n3\n11\n39\n")
+    );
     let res = runner::run_prog(
         &json,
         None,
@@ -159,10 +162,10 @@ fn lower_duffs() {
             String::from("false"),
         ],
         Duration::from_secs(3),
-        false,
+        "out/test_duffs",
     )
     .unwrap();
-    assert_eq!(res, String::from("2\n0\n12\n2\n0\n12\n2\n0\n32\n"));
+    assert_eq!(res.stdout, String::from("2\n0\n12\n2\n0\n12\n2\n0\n32\n"));
 }
 
 #[test]
@@ -199,9 +202,9 @@ fn lower_single_switch() {
             String::from("false"),
         ],
         Duration::from_secs(3),
-        false,
+        "out/test_single_switch",
     );
-    assert_eq!(res.unwrap(), String::from("10\n101\n-5\n"));
+    assert_eq!(res.unwrap().stdout, String::from("10\n101\n-5\n"));
 }
 
 #[test]
@@ -242,10 +245,10 @@ fn lower_single_duff() {
             String::from("false"),
         ],
         Duration::from_secs(3),
-        false,
+        "out/test_single_duff",
     );
     assert_eq!(
-        res.unwrap(),
+        res.unwrap().stdout,
         String::from("-20\n10\n9\n8\n7\n6\n5\n4\n3\n2\n1\n-5\n")
     );
 }
@@ -279,13 +282,13 @@ fn test_loop() {
             String::from("false"),
         ],
         Duration::from_secs(20),
-        false,
+        "out/test_loop",
     )
     .unwrap();
     // * 2 for newlines
     let loops_u: usize = (loops * 2).try_into().unwrap();
-    assert_eq!(res.len(), loops_u);
-    assert!(res[0..1] == *"1");
+    assert_eq!(res.stdout.len(), loops_u);
+    assert!(res.stdout[0..1] == *"1");
 }
 
 #[test]
@@ -331,7 +334,7 @@ fn test_try_catch() {
             String::from("false"),
         ],
         Duration::from_secs(3),
-        false,
+        "out/test_try_cath",
     );
-    assert_eq!(res.unwrap(), String::from("3\n2\ntrue\n"));
+    assert_eq!(res.unwrap().stdout, String::from("3\n2\ntrue\n"));
 }

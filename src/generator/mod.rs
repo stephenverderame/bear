@@ -74,17 +74,20 @@ pub mod rnd {
         //Box::new(rand::thread_rng())
     }
 
+    #[allow(unused)]
     pub fn get_seed() -> u64 {
         SEED.load(Ordering::SeqCst)
     }
 
     /// Sets the seed of the program random generator
+    #[allow(unused)]
     pub fn set_seed(seed: u64) {
         SEED.store(seed, Ordering::SeqCst);
         *GEN.lock().unwrap() = NumGen::seed_from_u64(seed);
     }
 
     /// Reseeds the program random generator to the current system time
+    #[allow(unused)]
     pub fn reseed() {
         set_seed(time_now_u64());
     }

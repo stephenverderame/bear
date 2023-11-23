@@ -1,4 +1,6 @@
-use rand::{distributions::Uniform, prelude::Distribution, seq::SliceRandom};
+use rand::{
+    distributions::Uniform, prelude::Distribution, seq::SliceRandom, Rng,
+};
 
 use crate::{
     bare_c::{AExpr, Block, DuffsInfo, LoopStatement, Pretty, Statement},
@@ -11,8 +13,8 @@ use super::{
     expr::{gen_aexpr, gen_bexpr},
     interval::Interval,
     rnd,
-    stmt::gen_stmt,
     stmt::StatementTy,
+    stmt::{gen_print, gen_stmt},
     Distribs, ExprInfo, StepType, Type, EXPR_FUEL,
 };
 
@@ -144,12 +146,37 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
     fuel: usize,
 ) -> Vec<Block<T>> {
     let mut res = vec![];
+    let mut has_print = false;
+    if !ctx.is_dead() && ctx.can_follow() && rnd::get_rng().gen_bool(0.2) {
+        // small chance of throwing in an extra print for good measure
+        if let Some(x) = gen_print(ctx) {
+            res.push(Block::Stmt(T::from(x)));
+            has_print = true;
+        }
+    }
     while res.is_empty()
         || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.seq.exp()
             && fuel > 0
             && (ctx.can_follow() || ctx.is_dead())
     {
-        res.extend(gen_block(pcfg, tp, ctx, distribs, funcs, fuel));
+        let blk = gen_block::<T, P>(pcfg, tp, ctx, distribs, funcs, fuel);
+        if blk.len() == 1 && !has_print {
+            if let Block::Stmt(stmt) = &blk[0] {
+                if stmt.is_print() {
+                    has_print = true;
+                }
+            }
+        }
+        res.extend(blk);
+    }
+    if !ctx.is_dead()
+        && ctx.can_follow()
+        && !has_print
+        && rnd::get_rng().gen_bool(0.7)
+    {
+        if let Some(x) = gen_print(ctx) {
+            res.push(Block::Stmt(T::from(x)));
+        }
     }
     res
 }

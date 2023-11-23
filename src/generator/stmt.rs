@@ -1,8 +1,11 @@
-use rand::distributions::{Distribution, Uniform, WeightedIndex};
+use rand::{
+    distributions::{Distribution, Uniform, WeightedIndex},
+    Rng,
+};
 use strum::EnumCount;
 
 use crate::{
-    bare_c::{AExpr, Expr, LoopStatement, Statement},
+    bare_c::{AExpr, BExpr, Expr, LoopStatement, Statement},
     pcfg::{AExprPCFG, ExprPCFG, StatementPCFG},
 };
 
@@ -10,8 +13,8 @@ use super::{
     context::{Context, FuncList},
     control_flow,
     expr::{gen_aexpr, gen_bexpr},
-    get_rand_avar, get_rand_mutable_avar, get_rand_mutable_bvar, rnd, Distribs,
-    ExprInfo, StepType, Type, EXPR_FUEL,
+    get_rand_avar, get_rand_bvar, get_rand_mutable_avar, get_rand_mutable_bvar,
+    rnd, Distribs, ExprInfo, StepType, Type, EXPR_FUEL,
 };
 
 /// Generates an assignment statement, updating the context accordingly
@@ -118,6 +121,8 @@ pub trait StatementTy {
         Self: Sized;
 
     fn to_enum(self) -> StatementEnum;
+
+    fn is_print(&self) -> bool;
 }
 
 fn gen_loop_stmt(
@@ -231,11 +236,9 @@ pub(super) fn gen_stmt<P: StatementPCFG>(
         Statement::THROW_IDX => {
             gen_throw(pcfg, expr_pcfg, ctx, distribs, funcs)
         }
-        Statement::PRINT_IDX => StatementEnum::Statement(Statement::Print(
-            get_rand_avar(ctx)
-                .map(|x| vec![Expr::AExpr(AExpr::Id(x))])
-                .unwrap_or_default(),
-        )),
+        Statement::PRINT_IDX => gen_print(ctx).unwrap_or_else(|| {
+            gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
+        }),
         // TODO
         Statement::PCALL_IDX => {
             gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
@@ -244,6 +247,25 @@ pub(super) fn gen_stmt<P: StatementPCFG>(
             .unwrap_or_else(|| {
                 gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
             }),
+    }
+}
+
+/// Generates a print statement to print an existing variable
+pub(super) fn gen_print(ctx: &mut Context) -> Option<StatementEnum> {
+    if (rnd::get_rng().gen_bool(0.7) || ctx.get_bvars().is_empty())
+        && !ctx.get_avars().is_empty()
+    {
+        get_rand_avar(ctx).map(|x| {
+            StatementEnum::Statement(Statement::Print(vec![Expr::AExpr(
+                AExpr::Id(x),
+            )]))
+        })
+    } else {
+        get_rand_bvar(ctx).map(|x| {
+            StatementEnum::Statement(Statement::Print(vec![Expr::BExpr(
+                BExpr::Id(x),
+            )]))
+        })
     }
 }
 
@@ -258,6 +280,10 @@ impl StatementTy for Statement {
     fn to_enum(self) -> StatementEnum {
         StatementEnum::Statement(self)
     }
+
+    fn is_print(&self) -> bool {
+        matches!(self, Self::Print(..))
+    }
 }
 
 impl StatementTy for LoopStatement {
@@ -270,5 +296,9 @@ impl StatementTy for LoopStatement {
 
     fn to_enum(self) -> StatementEnum {
         StatementEnum::LoopStmt(self)
+    }
+
+    fn is_print(&self) -> bool {
+        matches!(self, Self::Stmt(Statement::Print(..)))
     }
 }
