@@ -46,7 +46,35 @@ struct LowerResult {
     /// The blocks should be popped up to and including the delim
     /// by the same syntax construct which pushed the delim.
     pub pending_block_stack: Vec<PendingBlockEntry>,
+    /// Instructions that need to be added to the beginning of the next block.
+    pub pending_trace_instrs: Vec<bril_rs::Instruction>,
 }
+
+/// Constructs a NOP instruction with extra arguments to pass information to the trace.
+fn trace_instr(
+    typ: &str,
+    args: &[&str],
+    labels: Option<&[&str]>,
+) -> bril_rs::Instruction {
+    bril_rs::Instruction::Effect {
+        op: bril_rs::EffectOps::Nop,
+        args: std::iter::once(typ.to_string())
+            .chain(args.iter().map(ToString::to_string))
+            .collect(),
+        funcs: vec![],
+        labels: labels.map_or_else(Vec::new, |x| {
+            x.iter().map(ToString::to_string).collect()
+        }),
+        pos: None,
+    }
+}
+
+pub const TRACE_LOOP_NEST: &str = "loop_nest";
+pub const TRACE_CATCH: &str = "catch";
+pub const TRACE_CONTINUE: &str = "continue";
+pub const TRACE_BREAK: &str = "break";
+pub const TRACE_MATCH_CASE: &str = "match_opt";
+pub const TRACE_SWITCH_DEFAULT: &str = "switch_default";
 
 impl LowerResult {
     /// Adds the current block to the cfg and resets the current block.
@@ -154,6 +182,7 @@ impl LowerResult {
             break_blocks: vec![],
             cur_temp_id: 0,
             pending_block_stack: vec![],
+            pending_trace_instrs: vec![],
         }
     }
 }

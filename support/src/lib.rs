@@ -62,7 +62,7 @@ pub fn array_pcfg(item: TokenStream) -> TokenStream {
 
             fn uniform() -> Self {
                 #[allow(clippy::cast_precision_loss)]
-                std::iter::repeat((1.0 / #len as f64).ln())
+                std::iter::repeat((1.0 / #len as f64))
                     .take(#len)
                     .collect::<Vec<_>>()
                     .try_into()

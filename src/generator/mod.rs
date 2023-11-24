@@ -27,6 +27,7 @@ const EXPR_FUEL: usize = 4;
 const STMT_FUEL: usize = 3;
 /// Maximum total amount of loop iteration a loop nest can have
 const LOOP_MAX_ITER: u64 = 8_000;
+const BLOCK_LIMIT: usize = 20;
 
 /// Bare C types
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
@@ -248,24 +249,15 @@ struct Distribs {
 
 impl Distribs {
     fn new(pcfg: &TopPCFG) -> Self {
-        let index =
-            WeightedIndex::new(pcfg.expr.a_expr.choice.iter().map(|x| x.exp()))
-                .unwrap();
+        let index = WeightedIndex::new(pcfg.expr.a_expr.choice.iter()).unwrap();
         let uniform = Uniform::new(0.0, 1.0);
         Self {
             aexpr_idx: index,
-            bexpr_idx: WeightedIndex::new(
-                pcfg.expr.b_expr.choice.iter().map(|x| x.exp()),
-            )
-            .unwrap(),
-            block_idx: WeightedIndex::new(
-                pcfg.block.choice.iter().map(|x| x.exp()),
-            )
-            .unwrap(),
-            type_idx: WeightedIndex::new(
-                pcfg.block.case_try_type.iter().map(|x| x.exp()),
-            )
-            .unwrap(),
+            bexpr_idx: WeightedIndex::new(pcfg.expr.b_expr.choice.iter())
+                .unwrap(),
+            block_idx: WeightedIndex::new(pcfg.block.choice.iter()).unwrap(),
+            type_idx: WeightedIndex::new(pcfg.block.case_try_type.iter())
+                .unwrap(),
             uniform,
         }
     }
@@ -303,6 +295,7 @@ pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
             FArg::Bool { name } => ctx.new_bvar(name, vec![]),
         }
     }
+    let mut block_limit = BLOCK_LIMIT;
     control_flow::gen_blocks(
         &pcfg.block,
         pcfg,
@@ -310,6 +303,7 @@ pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
         &mut Distribs::new(pcfg),
         &mut funcs,
         STMT_FUEL,
+        &mut block_limit,
     )
 }
 

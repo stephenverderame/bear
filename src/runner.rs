@@ -28,10 +28,10 @@ pub enum RunnerError {
     /// Error converting final output to string
     Utf8Conversion(String),
     /// Nonzero error code from a compiler stage
-    StageError(i32, String),
+    StageError(i32, String, String),
 }
 
-const INTERPRETER: &str = "brili";
+const INTERPRETER: &str = "brili-t";
 
 /// The result of running a program
 #[derive(Debug, PartialEq, Eq)]
@@ -115,10 +115,14 @@ fn run_stage(
     match child.wait_timeout(timeout) {
         Ok(Some(status)) if status.code() == Some(0) => (),
         Ok(Some(status)) => {
+            if let Some(mut stderr) = child.stderr {
+                stderr.read_to_end(err).unwrap();
+            }
             return Err(RunnerError::StageError(
                 status.code().unwrap_or(-1),
                 name,
-            ))
+                String::from_utf8(err.clone()).unwrap(),
+            ));
         }
         Ok(None) => {
             child.kill().unwrap();
@@ -158,6 +162,8 @@ pub fn gen_main_args(args: &[FArg]) -> Vec<String> {
 /// result of running directly through the interpreter, returns `false`.
 /// Otherwise, returns `true`.
 ///
+/// Stores stdout temporarily in `out/real.out` and `out/test.out`.
+///
 /// # Returns
 /// `true` if the program passes the differential test, `false` otherwise.
 pub fn differential_test(
@@ -165,8 +171,12 @@ pub fn differential_test(
     pipeline: &[CompilerStage],
     brili_args: Vec<String>,
     timeout: Duration,
+    trace_out: Option<&str>,
 ) -> TestResult {
-    run_prog(prog_json, None, brili_args.clone(), timeout, "out/real").map_or_else(|_| {
+    let mut first_args = trace_out
+        .map_or_else(Vec::new, |out| vec![String::from("-t"), out.to_string()]);
+    first_args.extend(brili_args.clone());
+    run_prog(prog_json, None, first_args, timeout, "out/real").map_or_else(|_| {
         eprintln!(
             "Error running program through interpreter. This is likely a bug in the fuzzer"
         );
@@ -178,7 +188,7 @@ pub fn differential_test(
             timeout,
             "out/test",
         ) {
-            Ok(res2) if res2 == res => TestResult::Success,
+            Ok(res2) if res2.stdout == res.stdout => TestResult::Success,
             actual => TestResult::Fail {
                 expected: res,
                 actual,

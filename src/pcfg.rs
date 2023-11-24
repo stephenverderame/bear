@@ -1,9 +1,10 @@
-use crate::generator::{TypeChoice, NUM_TYPES};
+use crate::generator::{rnd, TypeChoice, NUM_TYPES};
 
 use super::bare_c::*;
+use rand::Rng;
 use strum::EnumCount;
 
-/// Probability space represented as a vector of floats of log probabilities
+/// Probability space represented as a vector of floats of probabilities
 /// The probabilities in a probability space must sum to 1
 /// and each probability must be non-negative
 ///
@@ -70,13 +71,13 @@ impl PCFG for AExprPCFG {
 
     fn uniform() -> Self {
         let mut res = Self {
-            reuse: 0.5_f64.ln(),
-            reuse_swap: 0.5_f64.ln(),
+            reuse: 0.5_f64,
+            reuse_swap: 0.5_f64,
             ..Default::default()
         };
         #[allow(clippy::cast_precision_loss)]
         for i in 0..AExpr::COUNT {
-            res.choice[i] = (1.0 / AExpr::COUNT as f64).ln();
+            res.choice[i] = 1.0 / AExpr::COUNT as f64;
         }
         res
     }
@@ -119,13 +120,13 @@ impl PCFG for BExprPCFG {
 
     fn uniform() -> Self {
         let mut res = Self {
-            boolean: 0.5_f64.ln(),
-            reuse: 0.5_f64.ln(),
+            boolean: 0.5_f64,
+            reuse: 0.5_f64,
             ..Default::default()
         };
         #[allow(clippy::cast_precision_loss)]
         for i in 0..BExpr::COUNT {
-            res.choice[i] = (1.0 / BExpr::COUNT as f64).ln();
+            res.choice[i] = 1.0 / BExpr::COUNT as f64;
         }
         res
     }
@@ -154,7 +155,7 @@ impl PCFG for ExprPCFG {
         Self: Sized,
     {
         let mut res = Self {
-            seq: pop_singleton(&mut input),
+            seq: pop_singleton(&mut input).min(0.6),
             expr_type: pop_singleton(&mut input),
             ..Default::default()
         };
@@ -169,8 +170,8 @@ impl PCFG for ExprPCFG {
         Self {
             a_expr: AExprPCFG::uniform(),
             b_expr: BExprPCFG::uniform(),
-            expr_type: 0.5_f64.ln(),
-            seq: 0.5_f64.ln(),
+            expr_type: 0.5_f64,
+            seq: 0.5_f64,
         }
     }
 }
@@ -225,8 +226,8 @@ impl PCFG for StmtPCFG {
     {
         Self {
             choice: <[f64; Statement::COUNT]>::uniform(),
-            new_var: 0.5_f64.ln(),
-            var_type: 0.5_f64.ln(),
+            new_var: 0.5_f64,
+            var_type: 0.5_f64,
         }
     }
 }
@@ -284,8 +285,8 @@ impl PCFG for LoopStmtPCFG {
     {
         Self {
             choice: <[f64; LoopStatement::COUNT]>::uniform(),
-            new_var: 0.5_f64.ln(),
-            var_type: 0.5_f64.ln(),
+            new_var: 0.5_f64,
+            var_type: 0.5_f64,
         }
     }
 }
@@ -378,7 +379,7 @@ impl PCFG for LoopPCFG {
             init: AExprPCFG::uniform(),
             limit: AExprPCFG::uniform(),
             step: AExprPCFG::uniform(),
-            inc_or_dec: 0.5_f64.ln(),
+            inc_or_dec: 0.5_f64,
         }
     }
 }
@@ -415,8 +416,8 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
         let mut res = Self::default();
         let step_ty = pop_singleton(&mut input);
         let (case_try_type, mut input) = TypeChoice::deserialize(input);
-        let case_seq = pop_singleton(&mut input);
-        let seq = pop_singleton(&mut input);
+        let case_seq = pop_singleton(&mut input).min(0.6);
+        let seq = pop_singleton(&mut input).min(0.6);
         let (stmt_pcfg, input) = T::deserialize(input);
         let (loop_pcfg, input) = LoopPCFG::deserialize(input);
         let (if_pcfg, input) = IfPCFG::deserialize(input);
@@ -441,10 +442,10 @@ impl<T: PCFG> PCFG for BlockPCFG<T> {
             if_pcfg: IfPCFG::uniform(),
             stmt: T::uniform(),
             loop_pcfg: LoopPCFG::uniform(),
-            seq: 0.5_f64.ln(),
-            case_seq: 0.5_f64.ln(),
+            seq: 0.5_f64,
+            case_seq: 0.5_f64,
             case_try_type: TypeChoice::uniform(),
-            step_ty: 0.5_f64.ln(),
+            step_ty: 0.5_f64,
         }
     }
 }
@@ -528,8 +529,8 @@ impl PCFG for FnPCFG {
     fn uniform() -> Self {
         let mut res = Self::default();
         for i in 0..3 {
-            res.arg_type[i] = (1.0 / 3.0_f64).ln();
-            res.ret_type[i] = (1.0 / 3.0_f64).ln();
+            res.arg_type[i] = 1.0 / 3.0_f64;
+            res.ret_type[i] = 1.0 / 3.0_f64;
         }
         res
     }
@@ -539,6 +540,46 @@ support::array_pcfg!([f64; Statement::COUNT]);
 support::array_pcfg!([f64; LoopStatement::COUNT]);
 // support::array_pcfg!([f64; StmtBlock::COUNT]);
 support::array_pcfg!([f64; NUM_TYPES]);
+
+pub fn flatten_pcfg(pcfg: &Vec<PSpace>) -> Vec<f64> {
+    let mut res = Vec::new();
+    for p in pcfg {
+        res.extend_from_slice(&p.0);
+    }
+    res
+}
+
+pub fn flat_to_pcfg(
+    template: &Vec<PSpace>,
+    mut flattened: &[f64],
+) -> Vec<PSpace> {
+    let mut res = Vec::new();
+    for p in template {
+        let len = p.0.len();
+        let head;
+        (head, flattened) = flattened.split_at(len);
+        let sum = head.iter().sum::<f64>();
+        let sum = if sum.abs() < f64::EPSILON {
+            f64::EPSILON
+        } else {
+            sum
+        };
+        let head = head.iter().map(|x| x / sum).collect::<Vec<_>>();
+        res.push(PSpace(head));
+    }
+    res
+}
+
+pub fn random_pcfg() -> TopPCFG {
+    let t = TopPCFG::uniform();
+    let template = t.serialize(Vec::new());
+    let mut f = flatten_pcfg(&template);
+    let mut rng = rnd::get_rng();
+    for e in &mut f {
+        *e = rng.gen_range(0.0..1.0);
+    }
+    TopPCFG::deserialize(flat_to_pcfg(&template, &f)).0
+}
 
 #[cfg(test)]
 mod serialization_test {

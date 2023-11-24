@@ -29,15 +29,30 @@ pub(super) fn gen_if<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Block<T> {
     let (cond, _) =
         gen_bexpr(&pcfg.if_pcfg.guard, ctx, distribs, funcs, EXPR_FUEL);
     let mut true_frame = ctx.child_frame();
-    let then_block =
-        gen_blocks(pcfg, tp, &mut true_frame, distribs, funcs, fuel - 1);
+    let then_block = gen_blocks(
+        pcfg,
+        tp,
+        &mut true_frame,
+        distribs,
+        funcs,
+        fuel - 1,
+        block_limit,
+    );
     let mut false_frame = ctx.child_frame();
-    let else_block =
-        gen_blocks(pcfg, tp, &mut false_frame, distribs, funcs, fuel - 1);
+    let else_block = gen_blocks(
+        pcfg,
+        tp,
+        &mut false_frame,
+        distribs,
+        funcs,
+        fuel - 1,
+        block_limit,
+    );
     let sf = Context::meet(true_frame, false_frame);
     ctx.update(sf);
     Block::If {
@@ -55,24 +70,39 @@ fn gen_switch<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Block<T> {
     let (switch, sw_info) = gen_switch_guard(tp, ctx, distribs, funcs);
     let mut cases = vec![];
     while (cases.len() < 2 && sw_info.interval.len() > 3)
-        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.case_seq.exp()
+        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.case_seq
     {
         let case_rng =
             sw_info.interval.lower_bound()..=sw_info.interval.upper_bound();
         let case_num = Uniform::from(case_rng).sample(&mut *rnd::get_rng());
         let case = AExpr::Num(case_num);
         let mut case_frame = ctx.child_frame();
-        let case_block =
-            gen_blocks(pcfg, tp, &mut case_frame, distribs, funcs, fuel - 1);
+        let case_block = gen_blocks(
+            pcfg,
+            tp,
+            &mut case_frame,
+            distribs,
+            funcs,
+            fuel - 1,
+            block_limit,
+        );
         cases.push((case, case_block, case_frame));
     }
     let mut default_frame = ctx.child_frame();
-    let default =
-        gen_blocks(pcfg, tp, &mut default_frame, distribs, funcs, fuel - 1);
+    let default = gen_blocks(
+        pcfg,
+        tp,
+        &mut default_frame,
+        distribs,
+        funcs,
+        fuel - 1,
+        block_limit,
+    );
     let mut sf = default_frame.stack_frame();
     let mut new_cases = vec![];
     for (case, case_block, fr) in cases {
@@ -94,6 +124,7 @@ fn gen_try_catch<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Block<T> {
     let catch_type = distribs.type_idx.sample(&mut *rnd::get_rng());
     let (catch_name, catch_type, mut try_frame) = match catch_type {
@@ -121,6 +152,7 @@ fn gen_try_catch<T: Pretty + StatementTy, P: StatementPCFG>(
             distribs,
             funcs,
             fuel - 1,
+            block_limit,
         ),
         catch_block: gen_blocks(
             pcfg,
@@ -129,6 +161,7 @@ fn gen_try_catch<T: Pretty + StatementTy, P: StatementPCFG>(
             distribs,
             funcs,
             fuel - 1,
+            block_limit,
         ),
         catch_name,
     };
@@ -144,6 +177,7 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Vec<Block<T>> {
     let mut res = vec![];
     let mut has_print = false;
@@ -155,11 +189,20 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
         }
     }
     while res.is_empty()
-        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.seq.exp()
+        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.seq
             && fuel > 0
+            && *block_limit > 0
             && (ctx.can_follow() || ctx.is_dead())
     {
-        let blk = gen_block::<T, P>(pcfg, tp, ctx, distribs, funcs, fuel);
+        let blk = gen_block::<T, P>(
+            pcfg,
+            tp,
+            ctx,
+            distribs,
+            funcs,
+            fuel,
+            block_limit,
+        );
         if blk.len() == 1 && !has_print {
             if let Block::Stmt(stmt) = &blk[0] {
                 if stmt.is_print() {
@@ -439,17 +482,13 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Block<T> {
     let var = ctx.new_var();
     let step_ty = gen_step_ty(distribs, pcfg);
     let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
-    let mut body_frame = ctx.loop_child_frame(
-        step_ty,
-        0.5_f64.ln(),
-        &var,
-        false,
-        init.max_iters,
-    );
+    let mut body_frame =
+        ctx.loop_child_frame(step_ty, 0.5_f64, &var, false, init.max_iters);
     body_frame.new_avar(&var, &ExprInfo::from_interval(init.iter_range));
     body_frame.pin_vars(&init.limit_info.vars);
     body_frame.pin_vars(&init.step_info.vars);
@@ -461,6 +500,7 @@ fn gen_for<T: Pretty + StatementTy, P: StatementPCFG>(
         distribs,
         funcs,
         fuel - 1,
+        block_limit,
     );
     ctx.update_from_loop(&body_frame.stack_frame());
     Block::For {
@@ -630,6 +670,7 @@ fn gen_while_body(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Vec<Block<LoopStatement>> {
     let mut body = vec![];
     while body_frame.get_pending_step() != StepType::None {
@@ -640,6 +681,7 @@ fn gen_while_body(
             distribs,
             funcs,
             fuel - 1,
+            block_limit,
         ));
     }
     body
@@ -657,8 +699,7 @@ fn gen_step_ty<P: StatementPCFG>(
     distribs: &mut Distribs,
     pcfg: &BlockPCFG<P>,
 ) -> StepType {
-    if distribs.uniform.sample(&mut *rnd::get_rng())
-        < pcfg.loop_pcfg.inc_or_dec.exp()
+    if distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.loop_pcfg.inc_or_dec
     {
         StepType::Inc
     } else {
@@ -666,6 +707,7 @@ fn gen_step_ty<P: StatementPCFG>(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     pcfg: &BlockPCFG<P>,
     tp: &TopPCFG,
@@ -673,9 +715,10 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Vec<Block<T>> {
     if fuel < 2 || ctx.is_dead() {
-        return gen_block(pcfg, tp, ctx, distribs, funcs, fuel);
+        return gen_block(pcfg, tp, ctx, distribs, funcs, fuel, block_limit);
     }
     let step_ty = gen_step_ty(distribs, pcfg);
     let do_while = distribs.uniform.sample(&mut *rnd::get_rng()) < 0.5;
@@ -692,7 +735,7 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
         step_ty,
     );
     let mut body_frame =
-        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), &var, true, cur_loop_iters);
+        ctx.loop_child_frame(step_ty, 0.5_f64, &var, true, cur_loop_iters);
     body_frame.pin_vars(&limit_info.vars);
     body_frame.pin_vars(&[var.clone()]);
     if do_while {
@@ -703,7 +746,14 @@ fn gen_while<T: Pretty + StatementTy, P: StatementPCFG>(
     } else {
         body_frame.new_avar(&var, &iter_range.into());
     }
-    let body = gen_while_body(tp, &mut body_frame, distribs, funcs, fuel - 1);
+    let body = gen_while_body(
+        tp,
+        &mut body_frame,
+        distribs,
+        funcs,
+        fuel - 1,
+        block_limit,
+    );
     let sf = body_frame.stack_frame();
     if do_while {
         ctx.update_from_do_while_loop(&sf);
@@ -757,9 +807,10 @@ fn gen_duffs_default_and_update_ctx<
     init: &LoopInit,
     sw_info: &ExprInfo,
     frames: Vec<StackFrame>,
+    block_limit: &mut usize,
 ) -> Vec<Block<T>> {
     let mut default_frame =
-        ctx.loop_child_frame(step_ty, 0.5_f64.ln(), var, false, init.max_iters);
+        ctx.loop_child_frame(step_ty, 0.5_f64, var, false, init.max_iters);
     default_frame.pin_vars(&init.limit_info.vars);
     default_frame.pin_vars(&[var.to_string()]);
     default_frame.pin_vars(&sw_info.vars);
@@ -770,8 +821,15 @@ fn gen_duffs_default_and_update_ctx<
             init.init_info.interval.union(init.limit_info.interval),
         ),
     );
-    let default =
-        gen_blocks(pcfg, tp, &mut default_frame, distribs, funcs, fuel - 1);
+    let default = gen_blocks(
+        pcfg,
+        tp,
+        &mut default_frame,
+        distribs,
+        funcs,
+        fuel - 1,
+        block_limit,
+    );
     let mut sf = default_frame.stack_frame();
     for frame in frames {
         sf = sf.meet(frame);
@@ -780,6 +838,7 @@ fn gen_duffs_default_and_update_ctx<
     default
 }
 
+#[allow(clippy::too_many_lines)]
 fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     pcfg: &BlockPCFG<P>,
     tp: &TopPCFG,
@@ -787,6 +846,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Block<T> {
     let step_ty = gen_step_ty(distribs, pcfg);
     let init = gen_loop_init(&pcfg.loop_pcfg, ctx, distribs, funcs, step_ty);
@@ -795,15 +855,10 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     let mut bodies = vec![];
     let mut frames = vec![];
     while (bodies.len() < 2 && sw_info.interval.len() > 3)
-        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.case_seq.exp()
+        || distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.case_seq
     {
-        let mut body_frame = ctx.loop_child_frame(
-            step_ty,
-            0.5_f64.ln(),
-            &var,
-            false,
-            init.max_iters,
-        );
+        let mut body_frame =
+            ctx.loop_child_frame(step_ty, 0.5_f64, &var, false, init.max_iters);
         body_frame.pin_vars(&init.limit_info.vars);
         body_frame.pin_vars(&[var.clone()]);
         body_frame.pin_vars(&sw_info.vars);
@@ -814,8 +869,15 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
                 init.init_info.interval.union(init.limit_info.interval),
             ),
         );
-        let body =
-            gen_blocks(pcfg, tp, &mut body_frame, distribs, funcs, fuel - 1);
+        let body = gen_blocks(
+            pcfg,
+            tp,
+            &mut body_frame,
+            distribs,
+            funcs,
+            fuel - 1,
+            block_limit,
+        );
         let case = AExpr::Num(
             Uniform::from(
                 sw_info.interval.lower_bound()..=sw_info.interval.upper_bound(),
@@ -826,8 +888,18 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
         frames.push(body_frame.stack_frame());
     }
     let default = gen_duffs_default_and_update_ctx(
-        pcfg, tp, ctx, distribs, funcs, fuel, step_ty, &var, &init, &sw_info,
+        pcfg,
+        tp,
+        ctx,
+        distribs,
+        funcs,
+        fuel,
+        step_ty,
+        &var,
+        &init,
+        &sw_info,
         frames,
+        block_limit,
     );
     Block::Duffs(DuffsInfo {
         var,
@@ -841,6 +913,7 @@ fn gen_duffs<T: Pretty + StatementTy, P: StatementPCFG>(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
     pcfg: &BlockPCFG<P>,
     tp: &TopPCFG,
@@ -848,8 +921,9 @@ pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     fuel: usize,
+    block_limit: &mut usize,
 ) -> Vec<Block<T>> {
-    let mut idx = if fuel == 0 {
+    let mut idx = if fuel == 0 || *block_limit == 0 {
         Block::<Statement>::STMT_IDX
     } else {
         distribs.block_idx.sample(&mut *rnd::get_rng())
@@ -859,38 +933,63 @@ pub(super) fn gen_block<T: Pretty + StatementTy, P: StatementPCFG>(
         idx = distribs.block_idx.sample(&mut *rnd::get_rng());
     }
     match idx {
-        Block::<Statement>::DEAD_IDX => vec![Block::Dead(gen_blocks(
-            pcfg,
-            tp,
-            &mut ctx.dead_child_frame(),
-            distribs,
-            funcs,
-            fuel - 1,
-        ))],
+        Block::<Statement>::DEAD_IDX => {
+            *block_limit -= 1;
+            vec![Block::Dead(gen_blocks(
+                pcfg,
+                tp,
+                &mut ctx.dead_child_frame(),
+                distribs,
+                funcs,
+                fuel - 1,
+                block_limit,
+            ))]
+        }
         Block::<Statement>::STMT_IDX => {
             let stmt =
                 gen_stmt(&pcfg.stmt, &tp.expr, ctx, distribs, funcs, None);
             vec![Block::Stmt(T::from(stmt))]
         }
         Block::<Statement>::IF_IDX => {
-            vec![gen_if(pcfg, tp, ctx, distribs, funcs, fuel)]
+            *block_limit -= 1;
+            vec![gen_if(pcfg, tp, ctx, distribs, funcs, fuel, block_limit)]
         }
         Block::<Statement>::SWITCH_IDX => {
-            vec![gen_switch(pcfg, tp, ctx, distribs, funcs, fuel)]
+            *block_limit -= 1;
+            vec![gen_switch(
+                pcfg,
+                tp,
+                ctx,
+                distribs,
+                funcs,
+                fuel,
+                block_limit,
+            )]
         }
         Block::<Statement>::TRYCATCH_IDX => {
-            vec![gen_try_catch(pcfg, tp, ctx, distribs, funcs, fuel)]
+            *block_limit -= 1;
+            vec![gen_try_catch(
+                pcfg,
+                tp,
+                ctx,
+                distribs,
+                funcs,
+                fuel,
+                block_limit,
+            )]
         }
         Block::<Statement>::FOR_IDX if ctx.max_loop_iter() > 10 => {
-            vec![gen_for(pcfg, tp, ctx, distribs, funcs, fuel)]
+            *block_limit -= 1;
+            vec![gen_for(pcfg, tp, ctx, distribs, funcs, fuel, block_limit)]
         }
         // Block::<Statement>::WHILE_IDX => {
         //     gen_while(pcfg, tp, ctx, distribs, funcs, fuel)
         // }
         Block::<Statement>::DUFFS_IDX if ctx.max_loop_iter() > 2 => {
-            vec![gen_duffs(pcfg, tp, ctx, distribs, funcs, fuel)]
+            *block_limit -= 1;
+            vec![gen_duffs(pcfg, tp, ctx, distribs, funcs, fuel, block_limit)]
         }
-        _ => gen_block(pcfg, tp, ctx, distribs, funcs, fuel),
+        _ => gen_block(pcfg, tp, ctx, distribs, funcs, fuel, block_limit),
         // _ => unreachable!(),
     }
 }

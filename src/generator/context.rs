@@ -202,7 +202,7 @@ impl StackFrame {
             .chain(self.facts.bvars.iter())
             .filter(|&x| !self.facts.pinned.contains(x))
         {
-            if rnd::get_rng().gen_range(0_f64..1_f64) < pin_prob.exp() {
+            if rnd::get_rng().gen_range(0_f64..1_f64) < pin_prob {
                 c.facts.pinned.insert(nm.clone());
             } else {
                 break;

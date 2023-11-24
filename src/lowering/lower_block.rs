@@ -10,7 +10,8 @@ use crate::{
 use super::{
     flattening::flatten_aexpr,
     lower_stmt::{add_instrs_to_result, lower_any_stmt},
-    LowerResult, PendingBlockEntry, CFG_HOLE_ID,
+    trace_instr, LowerResult, PendingBlockEntry, CFG_HOLE_ID, TRACE_CATCH,
+    TRACE_LOOP_NEST, TRACE_MATCH_CASE, TRACE_SWITCH_DEFAULT,
 };
 
 /// Construct a branch instruction.
@@ -219,7 +220,14 @@ fn lower_for(
     // handle body
     r.pending_block_stack.push(PendingBlockEntry::Delim);
     let body_block = r.cur_block_id;
+    r.pending_trace_instrs.push(trace_instr(
+        TRACE_LOOP_NEST,
+        &[&format!("{}", r.break_blocks.len())],
+        None,
+    ));
     r = lower_blocks(body, r).finish_block(true);
+    r.pending_trace_instrs.pop();
+
     // pop and connext edges to step block
     r = r.connect_to_block(step_block);
     r.break_blocks.pop();
@@ -304,6 +312,13 @@ fn switch_body_blocks<S: StatementTy + Pretty>(
     let num_blocks = case_blocks.len();
     for (i, case_block) in case_blocks.into_iter().enumerate() {
         body_start_blocks.push(r.cur_block_id);
+        if !fallthrough {
+            r.pending_trace_instrs.push(trace_instr(
+                TRACE_MATCH_CASE,
+                &[],
+                None,
+            ));
+        }
         r = lower_blocks(case_block, r).finish_block(true);
         if fallthrough {
             if let PendingBlockEntry::Block(body_end_block) =
@@ -321,6 +336,8 @@ fn switch_body_blocks<S: StatementTy + Pretty>(
             } else {
                 panic!("expected block")
             }
+        } else {
+            r.pending_trace_instrs.pop();
         }
     }
     (r, body_start_blocks)
@@ -352,7 +369,15 @@ fn lower_switch<S: StatementTy + Pretty>(
     // default case so that this is the fallthrough of the last branch
     r.pending_block_stack.push(PendingBlockEntry::Delim);
     let default_block = r.cur_block_id;
+
+    r.pending_trace_instrs.push(trace_instr(
+        TRACE_SWITCH_DEFAULT,
+        &[&format!("{fallthrough}")],
+        None,
+    ));
     r = lower_blocks(default, r).finish_block(true);
+    r.pending_trace_instrs.pop();
+
     let body_start_blocks;
     (r, body_start_blocks) =
         switch_body_blocks(case_blocks, fallthrough, default_block, r);
@@ -392,8 +417,14 @@ fn lower_duffs(info: DuffsInfo, mut r: LowerResult) -> LowerResult {
     r.continue_blocks.push(step_block);
     let body_start_id;
     let test_start_id = r.cur_block_id;
+    r.pending_trace_instrs.push(trace_instr(
+        TRACE_LOOP_NEST,
+        &[&format!("{}", r.break_blocks.len())],
+        None,
+    ));
     (r, body_start_id) =
         lower_switch(info.guard, info.bodies, info.default, true, r);
+    r.pending_trace_instrs.pop();
     r.break_blocks.pop();
     r.continue_blocks.pop();
     let end_switch_id = r.cur_block_id;
@@ -438,7 +469,11 @@ fn lower_try_catch<S: StatementTy + Pretty>(
 
     let catch_start_id = r.cur_block_id;
     r.pending_block_stack.push(PendingBlockEntry::Delim);
+
+    r.pending_trace_instrs
+        .push(trace_instr(TRACE_CATCH, &[], None));
     r = lower_blocks(catch_block, r).finish_block(true);
+    r.pending_trace_instrs.pop();
 
     // try block
     r.catch_blocks.push((catch_name, catch_start_id));

@@ -5,15 +5,12 @@ mod bare_c;
 mod pcfg;
 extern crate strum;
 extern crate support;
-use std::time::Duration;
 
 use bril_rs::Program;
 use clap::Parser;
-use generator::FArg;
-use pcfg::*;
 use runner::CompilerStage;
-
-use crate::runner::{differential_test, gen_main_args};
+use search::find_bugs;
+mod search;
 
 mod generator;
 mod lowering;
@@ -31,34 +28,8 @@ struct Args {
 #[allow(clippy::too_many_lines)]
 fn main() {
     let cli = Args::parse();
-    let pcfg = pcfg::TopPCFG::uniform();
-    let args = vec![
-        FArg::int("a", 0, 100),
-        FArg::int("b", -50, 50),
-        FArg::int("c", 0, 100),
-        FArg::bool("d"),
-        FArg::bool("e"),
-    ];
     let stages = cli_to_stages(cli.stages);
-    for _ in 0..1 {
-        let prog = generator::gen_function(&pcfg, &args);
-        println!("{}", bare_c::display(&prog));
-        println!("DONE");
-        let prog = lowering::lower(prog);
-        let prog = serde_json::to_string(&to_prog(prog.to_src(true))).unwrap();
-        let prog_args = gen_main_args(&args);
-        match differential_test(
-            &prog,
-            &stages,
-            prog_args,
-            Duration::from_secs(5),
-        ) {
-            runner::TestResult::Success => (),
-            runner::TestResult::Fail { .. } => {
-                panic!("Differential test failed");
-            }
-        }
-    }
+    find_bugs(&stages);
 }
 
 fn to_prog(body: Vec<bril_rs::Code>) -> Program {

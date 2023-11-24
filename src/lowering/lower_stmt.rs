@@ -6,8 +6,11 @@ use crate::{
     generator::{StatementEnum, StatementTy},
 };
 
-use super::flattening::{flatten_expr, FlattenResult};
-use super::LowerResult;
+use super::{
+    flattening::{flatten_expr, FlattenResult},
+    trace_instr, TRACE_BREAK,
+};
+use super::{LowerResult, TRACE_CONTINUE};
 
 /// Adds instructions of the given `FlattenResult` to the
 /// current block of `LowerResult` and returns the updated
@@ -158,7 +161,12 @@ fn lower_throw(n: usize, e: Option<Expr>, mut res: LowerResult) -> LowerResult {
 }
 
 #[must_use]
-fn lower_stmt(stmt: Statement, res: LowerResult) -> LowerResult {
+fn lower_stmt(stmt: Statement, mut res: LowerResult) -> LowerResult {
+    for trace_i in res.pending_trace_instrs {
+        res.cur_block.instrs.push((res.cfg.next_instr_id, trace_i));
+        res.cfg.next_instr_id += 1;
+    }
+    res.pending_trace_instrs = vec![];
     match stmt {
         Statement::Assign { dest, src } => lower_assign(dest, src, res),
         Statement::PCall(..) => unimplemented!(),
@@ -173,6 +181,11 @@ fn lower_loop_stmt(stmt: LoopStatement, mut res: LowerResult) -> LowerResult {
     match stmt {
         LoopStatement::Break(n) => {
             let target = res.break_blocks[res.break_blocks.len() - 1 - n];
+            res.cur_block.instrs.push((
+                res.cfg.next_instr_id,
+                trace_instr(TRACE_BREAK, &[], None),
+            ));
+            res.cfg.next_instr_id += 1;
             res.cur_block.terminator = Some((
                 res.cfg.next_instr_id,
                 Instruction::Effect {
@@ -188,6 +201,11 @@ fn lower_loop_stmt(stmt: LoopStatement, mut res: LowerResult) -> LowerResult {
         }
         LoopStatement::Continue(n) => {
             let target = res.continue_blocks[res.continue_blocks.len() - 1 - n];
+            res.cur_block.instrs.push((
+                res.cfg.next_instr_id,
+                trace_instr(TRACE_CONTINUE, &[], None),
+            ));
+            res.cfg.next_instr_id += 1;
             res.cur_block.terminator = Some((
                 res.cfg.next_instr_id,
                 Instruction::Effect {

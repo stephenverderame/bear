@@ -27,23 +27,22 @@ fn gen_assign<P: StatementPCFG>(
     funcs: &mut FuncList,
 ) -> Statement {
     let typ = if distribs.uniform.sample(&mut *rnd::get_rng())
-        >= pcfg.get_bool_type().exp()
+        >= pcfg.get_bool_type()
     {
         Type::Int
     } else {
         Type::Bool
     };
-    let var = if distribs.uniform.sample(&mut *rnd::get_rng())
-        < pcfg.get_new_var().exp()
-    {
-        if typ == Type::Int {
-            get_rand_mutable_avar(ctx).unwrap_or_else(|| ctx.new_var())
+    let var =
+        if distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.get_new_var() {
+            if typ == Type::Int {
+                get_rand_mutable_avar(ctx).unwrap_or_else(|| ctx.new_var())
+            } else {
+                get_rand_mutable_bvar(ctx).unwrap_or_else(|| ctx.new_var())
+            }
         } else {
-            get_rand_mutable_bvar(ctx).unwrap_or_else(|| ctx.new_var())
-        }
-    } else {
-        ctx.new_var()
-    };
+            ctx.new_var()
+        };
     ctx.kill_available_exprs(&var, typ);
     let expr = if typ == Type::Int {
         let (expr, expr_info) =
@@ -207,7 +206,7 @@ pub(super) fn gen_stmt<P: StatementPCFG>(
         Statement::ASSIGN_IDX
     } else {
         idx.unwrap_or_else(|| {
-            WeightedIndex::new(pcfg.get_choice().iter().map(|x| x.exp()))
+            WeightedIndex::new(pcfg.get_choice().iter())
                 .unwrap()
                 .sample(&mut *rnd::get_rng())
         })
