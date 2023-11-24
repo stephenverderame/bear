@@ -516,7 +516,7 @@ impl<'a> Context<'a> {
         if self.cur.nests.nested_trys.is_empty() {
             return None;
         }
-        let idx = (distrib.sample(&mut *rnd::get_rng())
+        let idx = (distrib.sample(&mut rnd::get_rng())
             * self.cur.nests.nested_trys.len() as f64)
             as usize;
         Some((
@@ -557,6 +557,7 @@ impl<'a> Context<'a> {
     }
 
     /// Updates the current context with information from a child
+    #[allow(dead_code)]
     pub(super) fn update_from_child(&mut self, child: &StackFrame) {
         self.cur.update_from_child(child);
     }
@@ -634,7 +635,7 @@ impl<'a> Context<'a> {
             .filter(|&x| self.cur.facts.avars.contains_key(x))
             .cloned()
             .collect::<Vec<_>>()
-            .choose(&mut *rnd::get_rng())
+            .choose(&mut rnd::get_rng())
             .cloned()
     }
 

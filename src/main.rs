@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic, clippy::nursery)]
 #![deny(clippy::all)]
-#![allow(clippy::wildcard_imports)]
+#![allow(clippy::wildcard_imports, clippy::module_name_repetitions)]
 mod bare_c;
 mod pcfg;
 extern crate strum;

@@ -549,6 +549,11 @@ pub fn flatten_pcfg(pcfg: &Vec<PSpace>) -> Vec<f64> {
     res
 }
 
+/// Converts a flattened vec of floats into a vector of probability spaces
+/// which can be used to generate a PCFG.
+///
+/// Normalizes each chunk of floats which corresponds to a probability space
+/// to sum to 1.
 pub fn flat_to_pcfg(
     template: &Vec<PSpace>,
     mut flattened: &[f64],
@@ -570,6 +575,7 @@ pub fn flat_to_pcfg(
     res
 }
 
+/// Generates a random PCFG
 pub fn random_pcfg() -> TopPCFG {
     let t = TopPCFG::uniform();
     let template = t.serialize(Vec::new());

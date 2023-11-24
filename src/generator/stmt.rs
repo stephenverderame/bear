@@ -26,7 +26,7 @@ fn gen_assign<P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
 ) -> Statement {
-    let typ = if distribs.uniform.sample(&mut *rnd::get_rng())
+    let typ = if distribs.uniform.sample(&mut rnd::get_rng())
         >= pcfg.get_bool_type()
     {
         Type::Int
@@ -34,7 +34,7 @@ fn gen_assign<P: StatementPCFG>(
         Type::Bool
     };
     let var =
-        if distribs.uniform.sample(&mut *rnd::get_rng()) < pcfg.get_new_var() {
+        if distribs.uniform.sample(&mut rnd::get_rng()) < pcfg.get_new_var() {
             if typ == Type::Int {
                 get_rand_mutable_avar(ctx).unwrap_or_else(|| ctx.new_var())
             } else {
@@ -138,13 +138,13 @@ fn gen_loop_stmt(
         x if x == LoopStatement::BREAK_IDX - 1 + Statement::COUNT => {
             ctx.set_loop_exit();
             Some(StatementEnum::LoopStmt(LoopStatement::Break(
-                Uniform::new(0, ctx.loop_depth()).sample(&mut *rnd::get_rng()),
+                Uniform::new(0, ctx.loop_depth()).sample(&mut rnd::get_rng()),
             )))
         }
         x if x == cont_id && ctx.get_pending_step() == StepType::None => {
             ctx.set_loop_exit();
             Some(StatementEnum::LoopStmt(LoopStatement::Continue(
-                Uniform::new(0, ctx.loop_depth()).sample(&mut *rnd::get_rng()),
+                Uniform::new(0, ctx.loop_depth()).sample(&mut rnd::get_rng()),
             )))
         }
         x if x == step_id
@@ -208,7 +208,7 @@ pub(super) fn gen_stmt<P: StatementPCFG>(
         idx.unwrap_or_else(|| {
             WeightedIndex::new(pcfg.get_choice().iter())
                 .unwrap()
-                .sample(&mut *rnd::get_rng())
+                .sample(&mut rnd::get_rng())
         })
     };
     match idx {

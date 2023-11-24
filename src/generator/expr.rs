@@ -61,7 +61,7 @@ fn get_redundant_expr(
     #[allow(clippy::map_unwrap_or)]
     get_rand_prev_aexpr(ctx)
         .map(|(x, x_info)| {
-            if distrib.uniform.sample(&mut *rnd::get_rng()) < pcfg.reuse_swap {
+            if distrib.uniform.sample(&mut rnd::get_rng()) < pcfg.reuse_swap {
                 match x {
                     AExpr::Add(lhs, rhs) => (AExpr::Add(rhs, lhs), x_info),
                     AExpr::Mul(lhs, rhs) => (AExpr::Mul(rhs, lhs), x_info),
@@ -177,7 +177,7 @@ pub(super) fn gen_aexpr(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> (AExpr, ExprInfo) {
-    let idx = distrib.aexpr_idx.sample(&mut *rnd::get_rng());
+    let idx = distrib.aexpr_idx.sample(&mut rnd::get_rng());
     if fuel == 0 {
         if idx < AExpr::COUNT / 2 && !ctx.get_avars().is_empty() {
             let var = get_rand_avar(ctx).unwrap();
@@ -213,8 +213,7 @@ pub(super) fn gen_aexpr(
         }
         _ => unreachable!(),
     };
-    if !is_redundant
-        && distrib.uniform.sample(&mut *rnd::get_rng()) < pcfg.reuse
+    if !is_redundant && distrib.uniform.sample(&mut rnd::get_rng()) < pcfg.reuse
     {
         ctx.new_aexpr(expr.clone(), expr_info.clone());
     }
@@ -320,7 +319,7 @@ pub(super) fn gen_bexpr(
     funcs: &mut FuncList,
     fuel: usize,
 ) -> (BExpr, Vec<String>) {
-    let idx = distrib.bexpr_idx.sample(&mut *rnd::get_rng());
+    let idx = distrib.bexpr_idx.sample(&mut rnd::get_rng());
     let mut is_redundant = false;
     let idx = if fuel == 0 { BExpr::BOOL_IDX } else { idx };
     #[allow(clippy::map_unwrap_or)]
@@ -339,7 +338,7 @@ pub(super) fn gen_bexpr(
             (BExpr::Not(Box::new(expr)), expr_info)
         }
         BExpr::BOOL_IDX => {
-            let b = distrib.uniform.sample(&mut *rnd::get_rng())
+            let b = distrib.uniform.sample(&mut rnd::get_rng())
                 < pcfg.b_expr.boolean;
             (BExpr::Bool(b), vec![])
         }
@@ -358,7 +357,7 @@ pub(super) fn gen_bexpr(
         x => unreachable!("Invalid index: {}", x),
     };
     if !is_redundant
-        && distrib.uniform.sample(&mut *rnd::get_rng()) < pcfg.b_expr.reuse
+        && distrib.uniform.sample(&mut rnd::get_rng()) < pcfg.b_expr.reuse
     {
         ctx.new_bexpr(expr.clone(), vars.clone());
     }

@@ -41,9 +41,9 @@ pub const NUM_TYPES: usize = Type::COUNT;
 pub type TypeChoice = [f64; NUM_TYPES];
 
 pub mod rnd {
-    use rand::{Rng, SeedableRng};
+    use rand::rngs::ThreadRng;
+    use rand::SeedableRng;
     use rand_chacha::ChaCha12Rng;
-    use std::ops::DerefMut;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
@@ -70,9 +70,9 @@ pub mod rnd {
     }
 
     /// Gets the PRNG for the program generator
-    pub fn get_rng() -> impl DerefMut<Target = impl Rng> {
-        GEN.lock().unwrap()
-        //Box::new(rand::thread_rng())
+    pub fn get_rng() -> ThreadRng {
+        // GEN.lock().unwrap()
+        rand::thread_rng()
     }
 
     #[allow(unused)]
@@ -211,31 +211,27 @@ impl std::ops::Div<Self> for ExprInfo {
 }
 
 fn get_rand_avar(ctx: &Context) -> Option<String> {
-    ctx.get_avars().choose(&mut *rnd::get_rng()).cloned()
+    ctx.get_avars().choose(&mut rnd::get_rng()).cloned()
 }
 
 fn get_rand_mutable_avar(ctx: &Context) -> Option<String> {
-    ctx.get_mutable_avars()
-        .choose(&mut *rnd::get_rng())
-        .cloned()
+    ctx.get_mutable_avars().choose(&mut rnd::get_rng()).cloned()
 }
 
 fn get_rand_bvar(ctx: &Context) -> Option<String> {
-    ctx.get_bvars().choose(&mut *rnd::get_rng()).cloned()
+    ctx.get_bvars().choose(&mut rnd::get_rng()).cloned()
 }
 
 fn get_rand_mutable_bvar(ctx: &Context) -> Option<String> {
-    ctx.get_mutable_bvars()
-        .choose(&mut *rnd::get_rng())
-        .cloned()
+    ctx.get_mutable_bvars().choose(&mut rnd::get_rng()).cloned()
 }
 
 fn get_rand_prev_aexpr(ctx: &Context) -> Option<(AExpr, ExprInfo)> {
-    ctx.get_aexprs().choose(&mut *rnd::get_rng()).cloned()
+    ctx.get_aexprs().choose(&mut rnd::get_rng()).cloned()
 }
 
 fn get_rand_prev_bexpr(ctx: &Context) -> Option<(BExpr, Vec<String>)> {
-    ctx.get_bexprs().choose(&mut *rnd::get_rng()).cloned()
+    ctx.get_bexprs().choose(&mut rnd::get_rng()).cloned()
 }
 
 /// Distributions for generating arithmetic expressions

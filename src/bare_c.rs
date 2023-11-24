@@ -34,6 +34,7 @@ pub enum BExpr {
     Eqa(Box<AExpr>, Box<AExpr>),
     Id(String),
     Bool(bool),
+    #[allow(dead_code)]
     FCall(String, Vec<Expr>),
     Redundant(Box<BExpr>),
     LoopInvariant(Box<BExpr>),
@@ -107,6 +108,7 @@ pub enum AExpr {
     Div(Box<AExpr>, Box<AExpr>),
     Id(String),
     Num(i64),
+    #[allow(dead_code)]
     FCall(String, Vec<Expr>),
     Redundant(Box<AExpr>),
     LoopInvariant(Box<AExpr>),
@@ -163,6 +165,7 @@ pub enum Statement {
     /// try-catch block, `Throw(1, ..)` throws out of the next innermost try-catch
     /// block, and so on.
     Throw(usize, Option<Expr>),
+    #[allow(dead_code)]
     PCall(String, Vec<Expr>),
     Print(Vec<Expr>),
 }
