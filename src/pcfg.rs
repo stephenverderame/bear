@@ -569,7 +569,13 @@ pub fn flat_to_pcfg(
         } else {
             sum
         };
-        let head = head.iter().map(|x| x / sum).collect::<Vec<_>>();
+        let head = head
+            .iter()
+            .map(|x| {
+                assert!(!x.is_nan());
+                x / sum
+            })
+            .collect::<Vec<_>>();
         res.push(PSpace(head));
     }
     res

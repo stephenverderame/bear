@@ -1,9 +1,14 @@
+use atomic_float::AtomicF64;
 use std::{
     collections::HashSet,
-    io::{stdout, Write},
     ops::RangeInclusive,
-    process::exit,
-    sync::mpsc::{channel, Receiver},
+    panic,
+    sync::{
+        atomic::{self, AtomicBool, AtomicU64, Ordering},
+        mpsc::channel,
+        Arc, Barrier, RwLock,
+    },
+    thread,
     time::Duration,
 };
 
@@ -26,18 +31,155 @@ use self::trace::{BehaviorVec, FailureType};
 
 mod trace;
 
+/// Size of the population. This is the nominal population size, but the actual
+/// number of tests run per generation is `POPULATION_SIZE * TRIALS_PER_PCFG`.
 const POPULATION_SIZE: usize = 10;
+/// # of nearest neighbors to consider when calculating novelty
 const K: usize = 8;
+/// # of individuals to select from each population
 const SELECT_SIZE: usize = POPULATION_SIZE / 2;
+/// # of trials to run per pcfg
 const TRIALS_PER_PCFG: usize = 3;
+/// Chance to crossover two pcfgs
 const CROSSOVER_RATE: f64 = 0.8;
+/// Chance to mutate a pcfg
 const MUTATION_RATE: f64 = 0.15;
+/// Maximum number of mutations to perform on a pcfg
 const MAX_NUM_MUTATIONS: usize = 10;
+/// Range of mutation delta
 const MUT_DELTA: RangeInclusive<f64> = -0.1..=0.1;
+/// Chance to mutate a probability by `MUT_DELTA`
 const MUT_DELTA_CHANCE: f64 = 0.8;
+/// Novelty threshold at which to save a behavior vector
 const NOVELTY_THRESH: f64 = 3_000.0;
+/// # of independent populations
+const POPULATIONS: usize = 3;
+/// # of local generations before sharing DNA across populations
+const GENS_TO_CROSS_POP: u64 = 2;
 
+/// The archive all the most novel individuals.
+#[allow(clippy::vec_box)]
+struct Archive<'a> {
+    knn: PointCloud<'a, BehaviorVec>,
+    saved: Vec<Box<BehaviorVec>>,
+}
+
+impl<'a> Archive<'a> {
+    fn new() -> Self {
+        Self {
+            knn: PointCloud::new(BehaviorVec::dist),
+            saved: vec![],
+        }
+    }
+
+    fn add_point(&mut self, point: BehaviorVec) {
+        self.saved.push(Box::new(point));
+        let ptr = self.saved.last().unwrap().as_ref() as *const BehaviorVec;
+        // safe bc each value is boxed, so ptr won't move and we don't mutate
+        // elements of saved
+        self.knn.add_point(unsafe { &*ptr });
+    }
+
+    fn get_nearest_k(
+        &self,
+        point: &BehaviorVec,
+        k: usize,
+    ) -> Vec<(f64, &BehaviorVec)> {
+        self.knn.get_nearest_k(point, k)
+    }
+
+    fn clone_point_cloud(&self) -> PointCloud<'a, BehaviorVec> {
+        self.knn.clone()
+    }
+
+    fn len(&self) -> usize {
+        self.saved.len()
+    }
+}
+
+/// Shared stats across all populations
+struct SharedStats {
+    pub bug_count: AtomicU64,
+    pub test_count: AtomicU64,
+    pub archive_max_dist: AtomicF64,
+    pub stop_flag: AtomicBool,
+    pub gens: AtomicU64,
+    pub shares: AtomicU64,
+}
+
+impl SharedStats {
+    const fn new() -> Self {
+        Self {
+            bug_count: AtomicU64::new(0),
+            test_count: AtomicU64::new(0),
+            archive_max_dist: AtomicF64::new(0.0),
+            stop_flag: AtomicBool::new(false),
+            gens: AtomicU64::new(0),
+            shares: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Runs the novelty search algorithm on the given pipeline of compiler stages.
 pub fn find_bugs(test_pipeline: &[CompilerStage]) {
+    let archive = Arc::new(RwLock::new(Archive::new()));
+    let (tx, rx) = channel();
+    ctrlc::set_handler(move || {
+        tx.send(()).unwrap();
+    })
+    .unwrap();
+    let old = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        // if any thread panics, stop the program
+        old(info);
+        std::process::exit(1);
+    }));
+    let stats = Arc::new(SharedStats::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let cross_pop_genomes: Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>> =
+        Arc::new(RwLock::new(std::array::from_fn(|_| None)));
+    let cross_pop_barrier = Arc::new(Barrier::new(POPULATIONS));
+    std::fs::create_dir_all("bugs").unwrap();
+    let mut threads = vec![];
+    for i in 0..POPULATIONS {
+        let a = archive.clone();
+        let t = test_pipeline.to_vec();
+        let st = stats.clone();
+        let bar = cross_pop_barrier.clone();
+        let cpg = cross_pop_genomes.clone();
+        threads.push(thread::spawn(move || {
+            population_search(&a, i, &st, &t, &bar, &cpg);
+        }));
+    }
+    loop {
+        print!(
+            "\rGens: {} | Shares: {} | Bugs: {} | Tests: {} | Novel: {}         ",
+            stats.gens.load(atomic::Ordering::SeqCst),
+            stats.shares.load(atomic::Ordering::SeqCst),
+            stats.bug_count.load(atomic::Ordering::SeqCst),
+            stats.test_count.load(atomic::Ordering::SeqCst),
+            archive.read().unwrap().len(),
+        );
+        if rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+            println!("\nStopping...");
+            stop_flag.store(true, atomic::Ordering::SeqCst);
+            break;
+        }
+    }
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
+/// Performs novelty search for a single population.
+fn population_search(
+    archive: &Arc<RwLock<Archive>>,
+    pop_idx: usize,
+    stats: &Arc<SharedStats>,
+    test_pipeline: &[CompilerStage],
+    cross_pop_barrier: &Arc<Barrier>,
+    cross_pop_genomes: &Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>>,
+) {
     let args = vec![
         FArg::int("a", 0, 100),
         FArg::int("b", -50, 50),
@@ -48,45 +190,83 @@ pub fn find_bugs(test_pipeline: &[CompilerStage]) {
     let mut pop = std::iter::repeat_with(random_pcfg)
         .take(POPULATION_SIZE)
         .collect::<Vec<_>>();
-    let mut archive = knn::PointCloud::new(BehaviorVec::dist);
-    let (tx, mut rx) = channel();
-    ctrlc::set_handler(move || {
-        tx.send(()).unwrap();
-    })
-    .unwrap();
-    let mut saved = vec![];
-    let mut bug_count = 0;
-    let mut test_count = 0;
-    let mut archive_max_dist = 0_f64;
-    std::fs::create_dir_all("bugs").unwrap();
-    // for each generation
-    loop {
-        (pop, bug_count, rx, test_count) = novelty_search_generation(
-            &mut archive,
+    let mut local_gens = 0_u64;
+    let mut local_shares = 0_u64;
+    while !stats.stop_flag.load(atomic::Ordering::SeqCst) {
+        pop = novelty_search_generation(
+            archive,
             &pop,
             &args,
             test_pipeline,
-            &mut saved,
-            bug_count,
-            rx,
-            test_count,
-            &mut archive_max_dist,
+            stats,
+            pop_idx,
         );
+        local_gens += 1;
+        if local_gens % GENS_TO_CROSS_POP == 0 {
+            local_shares += 1;
+            share_dna_across_pops(
+                &mut pop,
+                pop_idx,
+                cross_pop_barrier,
+                cross_pop_genomes,
+            );
+            stats.shares.fetch_max(local_shares, Ordering::SeqCst);
+        }
+        stats.gens.fetch_max(local_gens, Ordering::SeqCst);
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::vec_box)]
+/// Shares the DNA of a random individual in the population with another
+/// population. Waits for all populations to finish sharing before returning.
+/// Also mutates the individual that was shared to be the child of the shared
+/// individual and another individual in the other population.
+/// # Arguments
+/// * `pop` - The population to share DNA from
+/// * `pop_idx` - Thread index of the population
+/// * `cross_pop_barrier` - Barrier to wait on before sharing DNA
+/// * `cross_pop_genomes` - The shared genomes from multiple populations
+fn share_dna_across_pops(
+    pop: &mut [TopPCFG],
+    pop_idx: usize,
+    cross_pop_barrier: &Arc<Barrier>,
+    cross_pop_genomes: &Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>>,
+) {
+    let mutating_individual =
+        Uniform::new(0, POPULATION_SIZE).sample(&mut rnd::get_rng());
+    cross_pop_genomes.write().unwrap()[pop_idx] =
+        Some(pop[mutating_individual].clone());
+    cross_pop_barrier.wait();
+    let u = Uniform::new(0, POPULATIONS);
+    let mut s = u.sample(&mut rnd::get_rng());
+    while s == pop_idx {
+        s = u.sample(&mut rnd::get_rng());
+    }
+    pop[mutating_individual] = single_reproduce(
+        &[
+            pop[mutating_individual].clone(),
+            cross_pop_genomes.read().unwrap()[s].clone().unwrap(),
+        ],
+        &Uniform::new(0.0, 1.0),
+    );
+}
+
+/// Performs a single generation of novelty search on the population.
+/// # Arguments
+/// * `archive` - The archive of behavior vectors keeping track of the most novel
+/// individuals across all populations
+/// * `pop` - The population to perform novelty search on
+/// * `args` - The argument types and ranges to generate args to pass to the program
+/// * `test_pipeline` - The pipeline of stages to run the program through
+/// * `stats` - The shared stats across all populations
+/// * `pop_idx` - The index of the current population
 fn novelty_search_generation(
-    archive: &mut PointCloud<BehaviorVec>,
+    archive: &Arc<RwLock<Archive>>,
     pop: &[TopPCFG],
     args: &[FArg],
     test_pipeline: &[CompilerStage],
-    saved: &mut Vec<Box<BehaviorVec>>,
-    mut bug_count: u64,
-    rx: Receiver<()>,
-    mut test_count: u64,
-    archive_max_dist: &mut f64,
-) -> (Vec<TopPCFG>, u64, Receiver<()>, u64) {
+    stats: &Arc<SharedStats>,
+    pop_idx: usize,
+) -> Vec<TopPCFG> {
     let mut temp = vec![];
     for pcfg in pop.iter() {
         for i in 0..TRIALS_PER_PCFG {
@@ -100,36 +280,32 @@ fn novelty_search_generation(
                 test_pipeline,
                 prog_args,
                 Duration::from_secs(20),
-                Some("out/rt.trace"),
+                Some(&format!("out/rt_{pop_idx}.trace")),
+                &format!("out/out_{pop_idx}"),
             );
             temp.push((
                 i,
-                Box::new(BehaviorVec::new(
-                    "out/rt.trace",
+                BehaviorVec::new(
+                    &format!("out/rt_{pop_idx}.trace"),
                     FailureType::from(&result),
-                )),
+                ),
             ));
-            bug_count = out_test_files(bug_count, &result, &brc, &prog);
-            test_count += 1;
-            print!(
-                "\rGen: {} | Passes: {} | Bugs: {bug_count} | Novel: {}                 ",
-                test_count / (TRIALS_PER_PCFG as u64 * POPULATION_SIZE as u64),
-                test_count - bug_count,
-                saved.len(),
-            );
-            stdout().flush().unwrap();
-            if rx.recv_timeout(Duration::from_millis(1)).is_ok() {
-                exit(0);
+            out_test_files(stats, &result, &brc, &prog, pop_idx);
+            stats.test_count.fetch_add(1, atomic::Ordering::SeqCst);
+            if stats.stop_flag.load(atomic::Ordering::SeqCst) {
+                return pop.to_vec();
             }
         }
     }
-    let r: Vec<_> = select(temp, archive, archive_max_dist, saved)
+    let r: Vec<_> = select(temp, archive, stats)
         .iter()
         .map(|(pop_id, _)| pop[*pop_id].clone())
         .collect();
-    (reproduce(&r), bug_count, rx, test_count)
+    reproduce(&r)
 }
 
+/// An element which is ordered by its average distance to its k-nearest neighbors
+/// in behavior space. Requires the distance is not `NaN`.
 #[derive(PartialEq, Clone)]
 struct HeapElem {
     dist: f64,
@@ -152,11 +328,11 @@ impl Eq for HeapElem {}
 
 /// Extracts the element that has the median sparseness from each chunk of `TRIALS_PER_PCFG` elements
 /// in `gen` and returns them in a new vector.
-#[allow(clippy::vec_box, clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss)]
 fn extract_medians(
-    gen: Vec<(usize, Box<BehaviorVec>)>,
-    archive: &PointCloud<BehaviorVec>,
-) -> Vec<(usize, Box<BehaviorVec>)> {
+    gen: Vec<(usize, BehaviorVec)>,
+    archive: &Arc<RwLock<Archive>>,
+) -> Vec<(usize, BehaviorVec)> {
     let mut res = vec![];
     let mut idx = 0;
     let mut indices = HashSet::new();
@@ -164,6 +340,8 @@ fn extract_medians(
         let mut dists = vec![];
         for (i, e) in b.iter().enumerate() {
             let dist = archive
+                .read()
+                .unwrap()
                 .get_nearest_k(&e.1, K)
                 .iter()
                 .map(|(b, _)| b)
@@ -189,43 +367,42 @@ fn extract_medians(
 
 /// Selects `SELECT_SIZE` elements from `gen` probabilistically, weighted by their
 /// novelty
-#[allow(clippy::vec_box, clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss)]
 fn select(
-    mut gen: Vec<(usize, Box<BehaviorVec>)>,
-    archive: &mut PointCloud<BehaviorVec>,
-    archive_max_dist: &mut f64,
-    saved: &mut Vec<Box<BehaviorVec>>,
-) -> Vec<(usize, Box<BehaviorVec>)> {
+    mut gen: Vec<(usize, BehaviorVec)>,
+    archive: &Arc<RwLock<Archive>>,
+    stats: &Arc<SharedStats>,
+) -> Vec<(usize, BehaviorVec)> {
     let old_len = gen.len();
     assert!(gen.len() % TRIALS_PER_PCFG == 0);
     gen = extract_medians(gen, archive);
     assert!(old_len / TRIALS_PER_PCFG == gen.len());
-    let mut cur_gen = archive.clone();
-    for individual in &gen {
-        cur_gen.add_point(&individual.1);
-    }
     // ith element of distance is the average distance of the ith element of gen
     let mut distances = vec![];
-    for (i, b) in gen.iter().enumerate() {
-        let dist = cur_gen
-            .get_nearest_k(&b.1, K)
-            .iter()
-            .map(|(b, _)| b)
-            .sum::<f64>()
-            / K as f64;
-        distances.push(HeapElem { dist, index: i });
+    let mut to_save = vec![];
+    {
+        let mut cur_gen = archive.read().unwrap().clone_point_cloud();
+        for individual in &gen {
+            cur_gen.add_point(&individual.1);
+        }
+        for (i, b) in gen.iter().enumerate() {
+            let dist = cur_gen
+                .get_nearest_k(&b.1, K)
+                .iter()
+                .map(|(b, _)| b)
+                .sum::<f64>()
+                / K as f64;
+            distances.push(HeapElem { dist, index: i });
 
-        if dist > *archive_max_dist * 0.8 || dist > NOVELTY_THRESH {
-            saved.push(b.1.clone());
-            let ptr = saved.last().unwrap().as_ref() as *const BehaviorVec;
-            // safe bc each value is boxed, so ptr won't move and we don't mutate
-            // elements of saved
-            archive.add_point(unsafe { &*ptr });
-
-            if dist > *archive_max_dist {
-                *archive_max_dist = dist;
+            let max_dist =
+                stats.archive_max_dist.fetch_max(dist, Ordering::SeqCst);
+            if dist > max_dist * 0.8 || dist > NOVELTY_THRESH {
+                to_save.push(b.1.clone());
             }
         }
+    }
+    for e in to_save {
+        archive.write().unwrap().add_point(e);
     }
     let max = distances.iter().max().unwrap().dist.max(f64::EPSILON);
 
@@ -243,59 +420,64 @@ fn select(
 /// Writes the test files to the bugs directory, if the test fails.
 /// Also increments the bug count.
 fn out_test_files(
-    mut bug_count: u64,
+    stats: &Arc<SharedStats>,
     result: &TestResult,
     brc: &[Block<Statement>],
     prog: &str,
-) -> u64 {
+    pop_idx: usize,
+) {
     if let TestResult::Fail { actual, .. } = result {
-        std::fs::write(format!("bugs/bug_{bug_count}.brc"), display(brc))
+        let bc = stats.bug_count.fetch_add(1, atomic::Ordering::SeqCst);
+        std::fs::write(format!("bugs/bug_{pop_idx}_{bc}.brc"), display(brc))
             .unwrap();
-        std::fs::write(format!("bugs/bug_{bug_count}.bril"), prog).unwrap();
+        std::fs::write(format!("bugs/bug_{pop_idx}_{bc}.bril"), prog).unwrap();
         match actual {
             Ok(actual) => {
                 std::fs::write(
-                    format!("bugs/bug_{bug_count}.out"),
+                    format!("bugs/bug_{pop_idx}_{bc}.out"),
                     &actual.stdout,
                 )
                 .unwrap();
                 std::fs::write(
-                    format!("bugs/bug_{bug_count}.err"),
+                    format!("bugs/bug_{pop_idx}_{bc}.err"),
                     &actual.stderr,
                 )
                 .unwrap();
             }
             Err(e) => {
                 std::fs::write(
-                    format!("bugs/bug_{bug_count}.err"),
+                    format!("bugs/bug_{pop_idx}_{bc}.err"),
                     format!("{e:?}"),
                 )
                 .unwrap();
             }
         }
-
-        bug_count += 1;
     }
-    bug_count
 }
 
 /// Creates a new population of `POPULATION_SIZE` `TopPCFG`s from the survivors.
 fn reproduce(survivors: &[TopPCFG]) -> Vec<TopPCFG> {
     let mut new_pop = vec![];
     let u = Uniform::new(0.0, 1.0);
-    let rng = &mut rnd::get_rng();
     while new_pop.len() < POPULATION_SIZE {
-        let samp = u.sample(&mut rnd::get_rng());
-        if samp < CROSSOVER_RATE {
-            let parents: Vec<_> = survivors.choose_multiple(rng, 2).collect();
-            new_pop.push(crossover(parents[0], parents[1]));
-        } else if samp < CROSSOVER_RATE + MUTATION_RATE {
-            new_pop.push(mutate(survivors.choose(rng).unwrap()));
-        } else {
-            new_pop.push(survivors.choose(rng).unwrap().clone());
-        }
+        new_pop.push(single_reproduce(survivors, &u));
     }
     new_pop
+}
+
+/// Creates a new `TopPCFG` from the survivors. Requires `survivors` to have
+/// at least two elements.
+fn single_reproduce(survivors: &[TopPCFG], u: &Uniform<f64>) -> TopPCFG {
+    let samp = u.sample(&mut rnd::get_rng());
+    if samp < CROSSOVER_RATE {
+        let parents: Vec<_> =
+            survivors.choose_multiple(&mut rnd::get_rng(), 2).collect();
+        crossover(parents[0], parents[1])
+    } else if samp < CROSSOVER_RATE + MUTATION_RATE {
+        mutate(survivors.choose(&mut rnd::get_rng()).unwrap())
+    } else {
+        survivors.choose(&mut rnd::get_rng()).unwrap().clone()
+    }
 }
 
 /// Performs crossover on two `TopPCFG`s to get a child pcfg.
@@ -321,7 +503,8 @@ fn mutate(a: &TopPCFG) -> TopPCFG {
         if b.sample(&mut rnd::get_rng()) < MUT_DELTA_CHANCE {
             f_flat[idx] +=
                 Uniform::new_inclusive(*MUT_DELTA.start(), *MUT_DELTA.end())
-                    .sample(&mut rnd::get_rng());
+                    .sample(&mut rnd::get_rng())
+                    .max(0.0);
         } else {
             f_flat[idx] = 0.0;
         }

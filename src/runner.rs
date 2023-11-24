@@ -172,11 +172,12 @@ pub fn differential_test(
     brili_args: Vec<String>,
     timeout: Duration,
     trace_out: Option<&str>,
+    out_base: &str,
 ) -> TestResult {
     let mut first_args = trace_out
         .map_or_else(Vec::new, |out| vec![String::from("-t"), out.to_string()]);
     first_args.extend(brili_args.clone());
-    run_prog(prog_json, None, first_args, timeout, "out/real").map_or_else(|_| {
+    run_prog(prog_json, None, first_args, timeout, &format!("{out_base}_real")).map_or_else(|_| {
         eprintln!(
             "Error running program through interpreter. This is likely a bug in the fuzzer"
         );
@@ -186,7 +187,7 @@ pub fn differential_test(
             Some(pipeline),
             brili_args,
             timeout,
-            "out/test",
+            &format!("{out_base}_test"),
         ) {
             Ok(res2) if res2.stdout == res.stdout => TestResult::Success,
             actual => TestResult::Fail {
