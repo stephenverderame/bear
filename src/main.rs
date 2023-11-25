@@ -6,10 +6,14 @@ mod pcfg;
 extern crate strum;
 extern crate support;
 
+use bare_c::display;
 use bril_rs::Program;
 use clap::Parser;
+use generator::FArg;
 use runner::CompilerStage;
 use search::find_bugs;
+
+use crate::pcfg::random_pcfg;
 mod search;
 
 mod generator;
@@ -23,13 +27,20 @@ mod test;
 #[derive(Parser)]
 struct Args {
     stages: Vec<String>,
+
+    #[clap(long, short)]
+    sample: bool,
 }
 
 #[allow(clippy::too_many_lines)]
 fn main() {
     let cli = Args::parse();
     let stages = cli_to_stages(cli.stages);
-    find_bugs(&stages);
+    if cli.sample {
+        print_random_prog();
+    } else {
+        find_bugs(&stages);
+    }
 }
 
 fn to_prog(body: Vec<bril_rs::Code>) -> Program {
@@ -76,4 +87,23 @@ fn cli_to_stages(v: Vec<String>) -> Vec<CompilerStage> {
         res.push(CompilerStage { cmd, args });
     }
     res
+}
+
+fn print_random_prog() {
+    let pcfg = random_pcfg();
+    let args = vec![
+        FArg::int("a", 0, 100),
+        FArg::int("b", -50, 50),
+        FArg::int("c", 0, 100),
+        FArg::bool("d"),
+        FArg::bool("e"),
+    ];
+    let brc = generator::gen_function(&pcfg, &args);
+    println!("{}", display(&brc));
+    let prog = lowering::lower(brc);
+    let bril = to_prog(prog.to_src(true));
+    let prog = serde_json::to_string(&bril).unwrap();
+    println!();
+    println!();
+    println!("{prog}");
 }

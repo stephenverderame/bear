@@ -13,6 +13,7 @@ use crate::{
     runner::{RunnerError, TestResult},
 };
 
+/// Mutates the `BehaviorVec` based on the given `ValueOps` of a value instruction
 const fn map_val_op_info(
     op: ValueOps,
     mut behavior_vec: BehaviorVec,
@@ -34,6 +35,7 @@ const fn map_val_op_info(
     behavior_vec
 }
 
+/// Mutates the `BehaviorVec` based on the given trace instruction.
 fn map_trace_info(
     args: &[String],
     _labels: &[String],
@@ -139,62 +141,93 @@ impl BehaviorVec {
         behavior_vec
     }
 
+    const fn arithmetic_ops(&self) -> i64 {
+        self.mul_count + self.div_count + self.add_count + self.sub_count
+    }
+
+    const fn cmp_ops(&self) -> i64 {
+        self.eq_count
+            + self.lt_count
+            + self.gt_count
+            + self.le_count
+            + self.ge_count
+    }
+
+    const fn control_flow_ops(&self) -> i64 {
+        self.jmp_count + self.br_count
+    }
+
+    const fn bool_ops(&self) -> i64 {
+        self.and_count + self.or_count
+    }
+
     /// The distance, in behavior space, between two `BehaviorVec`s.
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub fn dist(a: &Self, b: &Self) -> f64 {
-        const INSTR_TYPE_DIVISOR: f64 = 100.0;
+        const INSTR_TYPE_DIVISOR: f64 = 500.0;
         let mut dist = 0.0;
-        dist += (a.icount - b.icount).pow(2) as f64;
+        dist +=
+            (a.icount - b.icount).div(INSTR_TYPE_DIVISOR as i64).pow(2) as f64;
         dist += ((a.failure_type as i64) - (b.failure_type as i64))
-            .mul(10_000)
+            .mul(10)
             .pow(2) as f64;
-        dist += ((a.mul_count - b.mul_count) as f64)
+        dist += ((a.arithmetic_ops() - b.arithmetic_ops()) as f64)
             .div(INSTR_TYPE_DIVISOR)
             .powi(2);
-        dist += ((a.div_count - b.div_count) as f64)
+        dist += ((a.control_flow_ops() - b.control_flow_ops()) as f64)
             .div(INSTR_TYPE_DIVISOR)
             .powi(2);
-        dist += ((a.add_count - b.add_count) as f64)
+        dist += ((a.cmp_ops() - b.cmp_ops() + (a.bool_ops() - b.bool_ops()))
+            as f64)
             .div(INSTR_TYPE_DIVISOR)
             .powi(2);
-        dist += ((a.sub_count - b.sub_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.and_count - b.and_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.or_count - b.or_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.eq_count - b.eq_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.lt_count - b.lt_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.gt_count - b.gt_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.le_count - b.le_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.ge_count - b.ge_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.jmp_count - b.jmp_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.br_count - b.br_count) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += (a.max_loop_nest - b.max_loop_nest).mul(100).pow(2) as f64;
+        // dist += ((a.mul_count - b.mul_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.div_count - b.div_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.add_count - b.add_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.sub_count - b.sub_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.and_count - b.and_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.or_count - b.or_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.eq_count - b.eq_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.lt_count - b.lt_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.gt_count - b.gt_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.le_count - b.le_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.ge_count - b.ge_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.jmp_count - b.jmp_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        // dist += ((a.br_count - b.br_count) as f64)
+        //     .div(INSTR_TYPE_DIVISOR)
+        //     .powi(2);
+        dist += (a.max_loop_nest - b.max_loop_nest).mul(10).pow(2) as f64;
         dist += (a.catches - b.catches).pow(2) as f64;
         dist += (a.duffs_count - b.duffs_count).pow(2) as f64;
         dist += (a.switch_cases - b.switch_cases).pow(2) as f64;
         dist += (a.switch_default - b.switch_default).pow(2) as f64;
         dist += (a.break_count - b.break_count).pow(2) as f64;
         dist += (a.continue_count - b.continue_count).pow(2) as f64;
-        dist += (a.max_repeat_jmps - b.max_repeat_jmps).pow(2) as f64;
+        dist += (a.max_repeat_jmps - b.max_repeat_jmps).div(100).pow(2) as f64;
         dist.sqrt()
     }
 }

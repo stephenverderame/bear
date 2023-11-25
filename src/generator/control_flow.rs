@@ -20,6 +20,7 @@ use super::{
 
 const LOOP_EXPR_FUEL: usize = 3;
 const LOOP_STEP_FUEL: usize = 2;
+const MAX_DEAD_SUBBLOCKS: usize = 5;
 
 /// Generates an if statement
 pub(super) fn gen_if<T: Pretty + StatementTy, P: StatementPCFG>(
@@ -181,7 +182,7 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
 ) -> Vec<Block<T>> {
     let mut res = vec![];
     let mut has_print = false;
-    if !ctx.is_dead() && ctx.can_follow() && rnd::get_rng().gen_bool(0.2) {
+    if !ctx.is_dead() && ctx.can_follow() && rnd::get_rng().gen_bool(0.7) {
         // small chance of throwing in an extra print for good measure
         if let Some(x) = gen_print(ctx) {
             res.push(Block::Stmt(T::from(x)));
@@ -194,6 +195,9 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
             && *block_limit > 0
             && (ctx.can_follow() || ctx.is_dead())
     {
+        if ctx.is_dead() && res.len() >= MAX_DEAD_SUBBLOCKS {
+            break;
+        }
         let blk = gen_block::<T, P>(
             pcfg,
             tp,
@@ -215,7 +219,7 @@ pub(super) fn gen_blocks<T: Pretty + StatementTy, P: StatementPCFG>(
     if !ctx.is_dead()
         && ctx.can_follow()
         && !has_print
-        && rnd::get_rng().gen_bool(0.7)
+        && rnd::get_rng().gen_bool(0.85)
     {
         if let Some(x) = gen_print(ctx) {
             res.push(Block::Stmt(T::from(x)));

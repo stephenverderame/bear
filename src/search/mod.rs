@@ -41,21 +41,27 @@ const SELECT_SIZE: usize = POPULATION_SIZE / 2;
 /// # of trials to run per pcfg
 const TRIALS_PER_PCFG: usize = 3;
 /// Chance to crossover two pcfgs
-const CROSSOVER_RATE: f64 = 0.8;
+const CROSSOVER_RATE: f64 = 0.6;
 /// Chance to mutate a pcfg
-const MUTATION_RATE: f64 = 0.15;
+const MUTATION_RATE: f64 = 0.25;
 /// Maximum number of mutations to perform on a pcfg
 const MAX_NUM_MUTATIONS: usize = 10;
+/// Max slices to swap during a single crossover
+const MAX_NUM_CROSSES: usize = 5;
 /// Range of mutation delta
 const MUT_DELTA: RangeInclusive<f64> = -0.1..=0.1;
 /// Chance to mutate a probability by `MUT_DELTA`
-const MUT_DELTA_CHANCE: f64 = 0.8;
+const MUT_DELTA_CHANCE: f64 = 0.4;
+/// Chance to swap two elements in a single pcfg
+const MUT_SWAP_CHANCE: f64 = 0.4;
 /// Novelty threshold at which to save a behavior vector
 const NOVELTY_THRESH: f64 = 3_000.0;
 /// # of independent populations
 const POPULATIONS: usize = 3;
 /// # of local generations before sharing DNA across populations
 const GENS_TO_CROSS_POP: u64 = 2;
+/// # of tests to generate from a population before saving the test
+const DEBUG_OUT_TEST_NUM: u64 = 50;
 
 /// The archive all the most novel individuals.
 #[allow(clippy::vec_box)]
@@ -118,6 +124,12 @@ impl SharedStats {
             shares: AtomicU64::new(0),
         }
     }
+}
+
+#[derive(Default)]
+struct LocalStats {
+    pub test_count: u64,
+    pub save_count: u64,
 }
 
 /// Runs the novelty search algorithm on the given pipeline of compiler stages.
@@ -192,6 +204,7 @@ fn population_search(
         .collect::<Vec<_>>();
     let mut local_gens = 0_u64;
     let mut local_shares = 0_u64;
+    let mut local_stats = LocalStats::default();
     while !stats.stop_flag.load(atomic::Ordering::SeqCst) {
         pop = novelty_search_generation(
             archive,
@@ -200,6 +213,7 @@ fn population_search(
             test_pipeline,
             stats,
             pop_idx,
+            &mut local_stats,
         );
         local_gens += 1;
         if local_gens % GENS_TO_CROSS_POP == 0 {
@@ -266,6 +280,7 @@ fn novelty_search_generation(
     test_pipeline: &[CompilerStage],
     stats: &Arc<SharedStats>,
     pop_idx: usize,
+    local_stats: &mut LocalStats,
 ) -> Vec<TopPCFG> {
     let mut temp = vec![];
     for pcfg in pop.iter() {
@@ -278,7 +293,7 @@ fn novelty_search_generation(
             let result = differential_test(
                 &prog,
                 test_pipeline,
-                prog_args,
+                prog_args.clone(),
                 Duration::from_secs(20),
                 Some(&format!("out/rt_{pop_idx}.trace")),
                 &format!("out/out_{pop_idx}"),
@@ -290,7 +305,19 @@ fn novelty_search_generation(
                     FailureType::from(&result),
                 ),
             ));
-            out_test_files(stats, &result, &brc, &prog, pop_idx);
+            out_test_files(stats, &result, &brc, &prog, &prog_args, pop_idx);
+            if local_stats.test_count % DEBUG_OUT_TEST_NUM == 0 {
+                std::fs::write(
+                    format!(
+                        "out/test_{pop_idx}_{}.brc",
+                        local_stats.save_count
+                    ),
+                    display(&brc),
+                )
+                .unwrap();
+                local_stats.save_count += 1;
+            }
+            local_stats.test_count += 1;
             stats.test_count.fetch_add(1, atomic::Ordering::SeqCst);
             if stats.stop_flag.load(atomic::Ordering::SeqCst) {
                 return pop.to_vec();
@@ -424,6 +451,7 @@ fn out_test_files(
     result: &TestResult,
     brc: &[Block<Statement>],
     prog: &str,
+    prog_args: &[String],
     pop_idx: usize,
 ) {
     if let TestResult::Fail { actual, .. } = result {
@@ -431,6 +459,11 @@ fn out_test_files(
         std::fs::write(format!("bugs/bug_{pop_idx}_{bc}.brc"), display(brc))
             .unwrap();
         std::fs::write(format!("bugs/bug_{pop_idx}_{bc}.bril"), prog).unwrap();
+        std::fs::write(
+            format!("bugs/bug_{pop_idx}_{bc}.args"),
+            prog_args.join(", "),
+        )
+        .unwrap();
         match actual {
             Ok(actual) => {
                 std::fs::write(
@@ -485,11 +518,17 @@ fn crossover(a: &TopPCFG, b: &TopPCFG) -> TopPCFG {
     let f = a.serialize(vec![]);
     let g = b.serialize(vec![]);
     let mut f_flat = flatten_pcfg(&f);
-    let g_flat = flatten_pcfg(&g);
-    let begin = Uniform::new(0, g_flat.len() - 1).sample(&mut rnd::get_rng());
-    let end = Uniform::new(1, g_flat.len() - begin).sample(&mut rnd::get_rng())
-        + begin;
-    f_flat[begin..end].copy_from_slice(&g_flat[begin..end]);
+    let mut g_flat = flatten_pcfg(&g);
+    for _ in 0..Uniform::new(1, MAX_NUM_CROSSES).sample(&mut rnd::get_rng()) {
+        let begin =
+            Uniform::new(0, g_flat.len() - 1).sample(&mut rnd::get_rng());
+        let end = Uniform::new(1, g_flat.len() - begin)
+            .sample(&mut rnd::get_rng())
+            + begin;
+        let prev = f_flat[begin..end].to_vec();
+        f_flat[begin..end].copy_from_slice(&g_flat[begin..end]);
+        g_flat[begin..end].copy_from_slice(&prev);
+    }
     TopPCFG::deserialize(flat_to_pcfg(&f, &f_flat)).0
 }
 
@@ -498,13 +537,21 @@ fn mutate(a: &TopPCFG) -> TopPCFG {
     let f = a.serialize(vec![]);
     let mut f_flat = flatten_pcfg(&f);
     let b = Uniform::new(0.0, 1.0);
-    for _ in 0..Uniform::new(0, MAX_NUM_MUTATIONS).sample(&mut rnd::get_rng()) {
-        let idx = Uniform::new(0, f_flat.len() - 1).sample(&mut rnd::get_rng());
-        if b.sample(&mut rnd::get_rng()) < MUT_DELTA_CHANCE {
+    for _ in 0..Uniform::new(1, MAX_NUM_MUTATIONS).sample(&mut rnd::get_rng()) {
+        let u = Uniform::new(0, f_flat.len() - 1);
+        let idx = u.sample(&mut rnd::get_rng());
+        let sample = b.sample(&mut rnd::get_rng());
+        if sample < MUT_DELTA_CHANCE {
             f_flat[idx] +=
                 Uniform::new_inclusive(*MUT_DELTA.start(), *MUT_DELTA.end())
                     .sample(&mut rnd::get_rng())
                     .max(0.0);
+        } else if sample < MUT_DELTA_CHANCE + MUT_SWAP_CHANCE {
+            let mut idx2 = u.sample(&mut rnd::get_rng());
+            while idx == idx2 {
+                idx2 = u.sample(&mut rnd::get_rng());
+            }
+            f_flat.swap(idx, idx2);
         } else {
             f_flat[idx] = 0.0;
         }
