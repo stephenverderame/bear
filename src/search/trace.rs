@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    ops::{Div, Mul},
-};
+use std::{collections::HashMap, ops::Mul};
 
 use bril_rs::{EffectOps, Instruction, ValueOps};
 
@@ -94,6 +91,25 @@ pub struct BehaviorVec {
     max_repeat_jmps: i64,
 }
 
+/// Classifies the number of instructions into a given class on a log scale.
+const fn icount_class(icount: i64) -> i64 {
+    if icount < 1 {
+        0
+    } else if icount < 10 {
+        1
+    } else if icount < 100 {
+        2
+    } else if icount < 1_000 {
+        3
+    } else if icount < 10_000 {
+        4
+    } else if icount < 100_000 {
+        5
+    } else {
+        6
+    }
+}
+
 impl BehaviorVec {
     /// Constructs a new `BehaviorVec` from a trace file and a failure type.
     pub fn new(trace_file: &str, fail: FailureType) -> Self {
@@ -161,74 +177,67 @@ impl BehaviorVec {
         self.and_count + self.or_count
     }
 
+    /// Converts the `BehaviorVec` into a vector of features in Behavior Space.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    pub const fn vectorize(&self) -> [i64; 13] {
+        [
+            icount_class(self.icount),
+            self.failure_type as i64 * 10,
+            icount_class(self.arithmetic_ops()),
+            icount_class(self.control_flow_ops()),
+            icount_class(self.bool_ops() + self.cmp_ops()),
+            self.max_loop_nest,
+            icount_class(self.catches),
+            icount_class(self.duffs_count),
+            icount_class(self.switch_cases),
+            icount_class(self.switch_default),
+            icount_class(self.break_count),
+            icount_class(self.continue_count),
+            icount_class(self.max_repeat_jmps),
+        ]
+    }
+
     /// The distance, in behavior space, between two `BehaviorVec`s.
-    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
     pub fn dist(a: &Self, b: &Self) -> f64 {
-        const INSTR_TYPE_DIVISOR: f64 = 500.0;
         let mut dist = 0.0;
-        dist +=
-            (a.icount - b.icount).div(INSTR_TYPE_DIVISOR as i64).pow(2) as f64;
+        dist += (icount_class(a.icount) - icount_class(b.icount)).pow(2) as f64;
         dist += ((a.failure_type as i64) - (b.failure_type as i64))
             .mul(10)
             .pow(2) as f64;
-        dist += ((a.arithmetic_ops() - b.arithmetic_ops()) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.control_flow_ops() - b.control_flow_ops()) as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        dist += ((a.cmp_ops() - b.cmp_ops() + (a.bool_ops() - b.bool_ops()))
-            as f64)
-            .div(INSTR_TYPE_DIVISOR)
-            .powi(2);
-        // dist += ((a.mul_count - b.mul_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.div_count - b.div_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.add_count - b.add_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.sub_count - b.sub_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.and_count - b.and_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.or_count - b.or_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.eq_count - b.eq_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.lt_count - b.lt_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.gt_count - b.gt_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.le_count - b.le_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.ge_count - b.ge_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.jmp_count - b.jmp_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        // dist += ((a.br_count - b.br_count) as f64)
-        //     .div(INSTR_TYPE_DIVISOR)
-        //     .powi(2);
-        dist += (a.max_loop_nest - b.max_loop_nest).mul(10).pow(2) as f64;
-        dist += (a.catches - b.catches).pow(2) as f64;
-        dist += (a.duffs_count - b.duffs_count).pow(2) as f64;
-        dist += (a.switch_cases - b.switch_cases).pow(2) as f64;
-        dist += (a.switch_default - b.switch_default).pow(2) as f64;
-        dist += (a.break_count - b.break_count).pow(2) as f64;
-        dist += (a.continue_count - b.continue_count).pow(2) as f64;
-        dist += (a.max_repeat_jmps - b.max_repeat_jmps).div(100).pow(2) as f64;
-        dist.sqrt()
+        dist += (icount_class(a.arithmetic_ops())
+            - icount_class(b.arithmetic_ops()))
+        .pow(2) as f64;
+        dist += (icount_class(a.control_flow_ops())
+            - icount_class(b.control_flow_ops()))
+        .pow(2) as f64;
+        dist += (icount_class(a.bool_ops() + a.cmp_ops())
+            - icount_class(b.cmp_ops() + b.bool_ops()))
+        .pow(2) as f64;
+        dist += (a.max_loop_nest - b.max_loop_nest).pow(2) as f64;
+        dist +=
+            (icount_class(a.catches) - icount_class(b.catches)).pow(2) as f64;
+        dist += (icount_class(a.duffs_count) - icount_class(b.duffs_count))
+            .pow(2) as f64;
+        dist += (icount_class(a.switch_cases) - icount_class(b.switch_cases))
+            .pow(2) as f64;
+        dist += (icount_class(a.switch_default)
+            - icount_class(b.switch_default))
+        .pow(2) as f64;
+        dist += (icount_class(a.break_count) - icount_class(b.break_count))
+            .pow(2) as f64;
+        dist += (icount_class(a.continue_count)
+            - icount_class(b.continue_count))
+        .pow(2) as f64;
+        dist += (icount_class(a.max_repeat_jmps)
+            - icount_class(b.max_repeat_jmps))
+        .pow(2) as f64;
+        assert!(dist >= -f64::EPSILON);
+        dist.max(0.0).sqrt()
     }
 }
 

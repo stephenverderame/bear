@@ -34,11 +34,11 @@ mod trace;
 /// Size of the population. This is the nominal population size, but the actual
 /// number of tests run per generation is `POPULATION_SIZE * TRIALS_PER_PCFG`.
 const POPULATION_SIZE: usize = 10;
-/// # of nearest neighbors to consider when calculating novelty
+/// Number of nearest neighbors to consider when calculating novelty
 const K: usize = 8;
-/// # of individuals to select from each population
-const SELECT_SIZE: usize = POPULATION_SIZE / 2;
-/// # of trials to run per pcfg
+/// Number of individuals to select from each population
+const SELECT_SIZE: usize = POPULATION_SIZE / 3;
+/// Number of trials to run per pcfg
 const TRIALS_PER_PCFG: usize = 3;
 /// Chance to crossover two pcfgs
 const CROSSOVER_RATE: f64 = 0.6;
@@ -51,17 +51,19 @@ const MAX_NUM_CROSSES: usize = 5;
 /// Range of mutation delta
 const MUT_DELTA: RangeInclusive<f64> = -0.1..=0.1;
 /// Chance to mutate a probability by `MUT_DELTA`
-const MUT_DELTA_CHANCE: f64 = 0.4;
+const MUT_DELTA_CHANCE: f64 = 0.6;
 /// Chance to swap two elements in a single pcfg
-const MUT_SWAP_CHANCE: f64 = 0.4;
+// const MUT_SWAP_CHANCE: f64 = 0.4;
 /// Novelty threshold at which to save a behavior vector
-const NOVELTY_THRESH: f64 = 3_000.0;
-/// # of independent populations
-const POPULATIONS: usize = 3;
-/// # of local generations before sharing DNA across populations
-const GENS_TO_CROSS_POP: u64 = 2;
-/// # of tests to generate from a population before saving the test
-const DEBUG_OUT_TEST_NUM: u64 = 50;
+const NOVELTY_THRESH: f64 = 1.0;
+/// Number of independent populations
+const POPULATIONS: usize = 8;
+/// Number of local generations before sharing DNA across populations
+const GENS_TO_CROSS_POP: u64 = 8;
+/// Number of tests to generate from a population before saving the test
+const DEBUG_OUT_TEST_NUM: u64 = 100;
+/// Number of generations to generate from a population before saving selected parents
+const DEBUG_OUT_GEN_NUM: u64 = 1;
 
 /// The archive all the most novel individuals.
 #[allow(clippy::vec_box)]
@@ -130,6 +132,7 @@ impl SharedStats {
 struct LocalStats {
     pub test_count: u64,
     pub save_count: u64,
+    pub gen_count: u64,
 }
 
 /// Runs the novelty search algorithm on the given pipeline of compiler stages.
@@ -205,6 +208,7 @@ fn population_search(
     let mut local_gens = 0_u64;
     let mut local_shares = 0_u64;
     let mut local_stats = LocalStats::default();
+    let mut waited = false;
     while !stats.stop_flag.load(atomic::Ordering::SeqCst) {
         pop = novelty_search_generation(
             archive,
@@ -223,6 +227,7 @@ fn population_search(
                 pop_idx,
                 cross_pop_barrier,
                 cross_pop_genomes,
+                &mut waited,
             );
             stats.shares.fetch_max(local_shares, Ordering::SeqCst);
         }
@@ -239,17 +244,25 @@ fn population_search(
 /// * `pop_idx` - Thread index of the population
 /// * `cross_pop_barrier` - Barrier to wait on before sharing DNA
 /// * `cross_pop_genomes` - The shared genomes from multiple populations
+/// * `waited` - Whether or not this population has already waited on the barrier.
+/// This is used so that we only wait for the other populations for the first
+/// sharing. Subsequent DNA shares will not wait for other populations to update
+/// their shared genomes. Purely for performance.
 fn share_dna_across_pops(
     pop: &mut [TopPCFG],
     pop_idx: usize,
     cross_pop_barrier: &Arc<Barrier>,
     cross_pop_genomes: &Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>>,
+    waited: &mut bool,
 ) {
     let mutating_individual =
         Uniform::new(0, POPULATION_SIZE).sample(&mut rnd::get_rng());
     cross_pop_genomes.write().unwrap()[pop_idx] =
         Some(pop[mutating_individual].clone());
-    cross_pop_barrier.wait();
+    if !*waited {
+        cross_pop_barrier.wait();
+        *waited = true;
+    }
     let u = Uniform::new(0, POPULATIONS);
     let mut s = u.sample(&mut rnd::get_rng());
     while s == pop_idx {
@@ -283,8 +296,8 @@ fn novelty_search_generation(
     local_stats: &mut LocalStats,
 ) -> Vec<TopPCFG> {
     let mut temp = vec![];
-    for pcfg in pop.iter() {
-        for i in 0..TRIALS_PER_PCFG {
+    for (i, pcfg) in pop.iter().enumerate() {
+        for _ in 0..TRIALS_PER_PCFG {
             let brc = generator::gen_function(pcfg, args);
             let prog = lowering::lower(brc.clone());
             let bril = to_prog(prog.to_src(true));
@@ -324,7 +337,8 @@ fn novelty_search_generation(
             }
         }
     }
-    let r: Vec<_> = select(temp, archive, stats)
+    local_stats.gen_count += 1;
+    let r: Vec<_> = select(temp, archive, stats, local_stats, pop_idx)
         .iter()
         .map(|(pop_id, _)| pop[*pop_id].clone())
         .collect();
@@ -361,28 +375,26 @@ fn extract_medians(
     archive: &Arc<RwLock<Archive>>,
 ) -> Vec<(usize, BehaviorVec)> {
     let mut res = vec![];
-    let mut idx = 0;
     let mut indices = HashSet::new();
     for b in gen.chunks(TRIALS_PER_PCFG) {
         let mut dists = vec![];
-        for (i, e) in b.iter().enumerate() {
+        for (pcfg_idx, e) in b {
             let dist = archive
                 .read()
                 .unwrap()
-                .get_nearest_k(&e.1, K)
+                .get_nearest_k(e, K)
                 .iter()
                 .map(|(b, _)| b)
                 .sum::<f64>()
                 / K as f64;
             dists.push(HeapElem {
                 dist,
-                index: idx + i,
+                index: *pcfg_idx,
             });
         }
         let median_idx = (TRIALS_PER_PCFG - 1) / 2;
         dists.select_nth_unstable(median_idx);
         indices.insert(dists[median_idx].index);
-        idx += b.len();
     }
     for (i, e) in gen.into_iter().enumerate() {
         if indices.contains(&i) {
@@ -394,11 +406,19 @@ fn extract_medians(
 
 /// Selects `SELECT_SIZE` elements from `gen` probabilistically, weighted by their
 /// novelty
+/// # Arguments
+/// * `gen` - The population to select from. The first element of each tuple is
+/// the index of the behavior vec's pcfg in the population.
+/// # Returns
+/// A vector of the selected behavior vectors. The first element of each tuple
+/// is the index of the behavior vec's pcfg in the population.
 #[allow(clippy::cast_precision_loss)]
 fn select(
     mut gen: Vec<(usize, BehaviorVec)>,
     archive: &Arc<RwLock<Archive>>,
     stats: &Arc<SharedStats>,
+    local_stats: &LocalStats,
+    pop_idx: usize,
 ) -> Vec<(usize, BehaviorVec)> {
     let old_len = gen.len();
     assert!(gen.len() % TRIALS_PER_PCFG == 0);
@@ -409,39 +429,75 @@ fn select(
     let mut to_save = vec![];
     {
         let mut cur_gen = archive.read().unwrap().clone_point_cloud();
-        for individual in &gen {
-            cur_gen.add_point(&individual.1);
+        for (_, individual) in &gen {
+            cur_gen.add_point(individual);
         }
-        for (i, b) in gen.iter().enumerate() {
+        for (pcfg_idx, b) in &gen {
             let dist = cur_gen
-                .get_nearest_k(&b.1, K)
+                .get_nearest_k(b, K)
                 .iter()
                 .map(|(b, _)| b)
                 .sum::<f64>()
                 / K as f64;
-            distances.push(HeapElem { dist, index: i });
+            distances.push(HeapElem {
+                dist,
+                index: *pcfg_idx,
+            });
 
             let max_dist =
                 stats.archive_max_dist.fetch_max(dist, Ordering::SeqCst);
             if dist > max_dist * 0.8 || dist > NOVELTY_THRESH {
-                to_save.push(b.1.clone());
+                to_save.push(b.clone());
             }
         }
     }
+    assert_eq!(distances.len(), gen.len());
     for e in to_save {
         archive.write().unwrap().add_point(e);
     }
-    let max = distances.iter().max().unwrap().dist.max(f64::EPSILON);
+    let sum: f64 = distances.iter().map(|e| e.dist).sum();
+    let sum = sum.max(f64::EPSILON);
 
     let res: Vec<_> = gen
         .into_iter()
-        .zip(distances.into_iter().map(|e| e.dist / max))
+        .zip(distances.iter().map(|e| e.dist / sum))
         .collect();
 
-    res.choose_multiple_weighted(&mut rnd::get_rng(), SELECT_SIZE, |e| e.1)
+    let r: Vec<_> = res
+        .choose_multiple_weighted(&mut rnd::get_rng(), SELECT_SIZE, |e| e.1)
         .unwrap()
-        .map(|(b, _)| b.clone())
+        .collect();
+    debug_out_novelties(&r, sum, local_stats, pop_idx);
+    r.into_iter()
+        .map(|((pcfg_idx, bv), _)| (*pcfg_idx, bv.clone()))
         .collect()
+}
+
+/// Every `DEBUG_OUT_GEN_NUM` generations, writes the selected parents to a file,
+/// saving their novelties and behavior vectors.
+/// # Arguments
+/// * `selected` - The selected parents
+/// * `sum` - The sum of the novelties of all individuals in the current generation
+fn debug_out_novelties(
+    selected: &[&((usize, BehaviorVec), f64)],
+    sum: f64,
+    local_stats: &LocalStats,
+    pop_idx: usize,
+) {
+    #[allow(clippy::modulo_one)]
+    if local_stats.gen_count % DEBUG_OUT_GEN_NUM == 0 {
+        let mut out_str = String::new();
+        for ((_pcfg_idx, bv), normalized_dist) in selected {
+            let dist = normalized_dist * sum;
+            let vec = bv.vectorize();
+            out_str += &format!("dist: {dist}\nprob: {normalized_dist}\n{bv:#?}\nbv: {vec:#?}\n\n");
+        }
+        std::fs::write(
+            format!("out/novelties_{pop_idx}_{}.txt", local_stats.gen_count),
+            out_str,
+        )
+        .unwrap();
+    }
 }
 
 /// Writes the test files to the bugs directory, if the test fails.
@@ -546,15 +602,17 @@ fn mutate(a: &TopPCFG) -> TopPCFG {
                 Uniform::new_inclusive(*MUT_DELTA.start(), *MUT_DELTA.end())
                     .sample(&mut rnd::get_rng())
                     .max(0.0);
-        } else if sample < MUT_DELTA_CHANCE + MUT_SWAP_CHANCE {
+        } else {
+            /*if sample < MUT_DELTA_CHANCE + MUT_SWAP_CHANCE */
             let mut idx2 = u.sample(&mut rnd::get_rng());
             while idx == idx2 {
                 idx2 = u.sample(&mut rnd::get_rng());
             }
             f_flat.swap(idx, idx2);
-        } else {
-            f_flat[idx] = 0.0;
         }
+        // else {
+        //     f_flat[idx] = 0.0;
+        // }
     }
     TopPCFG::deserialize(flat_to_pcfg(&f, &f_flat)).0
 }

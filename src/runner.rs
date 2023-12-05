@@ -29,6 +29,8 @@ pub enum RunnerError {
     Utf8Conversion(String),
     /// Nonzero error code from a compiler stage
     StageError(i32, String, String),
+    /// Error reading/writing or creating a file
+    FileError(String),
 }
 
 const INTERPRETER: &str = "brili-t";
@@ -63,11 +65,12 @@ pub fn run_prog(
     let mut processes = vec![];
     let mut stage_names = vec![];
     let pipeline = pipeline.map(<[CompilerStage]>::to_vec).unwrap_or_default();
+    let temp_file = format!("{out_name}.temp");
+    std::fs::create_dir_all(Path::new(&temp_file).parent().unwrap()).unwrap();
     for stage in pipeline {
         let mut process = Command::new(&stage.cmd);
         process.args(&stage.args);
         process.stdin(Stdio::piped());
-        process.stdout(Stdio::piped());
         process.stderr(Stdio::piped());
         processes.push(process);
         stage_names.push(stage.cmd.clone());
@@ -76,14 +79,18 @@ pub fn run_prog(
     interpreter.args(brili_args);
     interpreter.stdin(Stdio::piped());
     let out_file = format!("{out_name}.out");
-    std::fs::create_dir_all(Path::new(&out_file).parent().unwrap()).unwrap();
     let final_out = File::create(&out_file).unwrap();
     interpreter.stdout(Stdio::from(final_out));
     interpreter.stderr(Stdio::piped());
     stage_names.push(String::from(INTERPRETER));
     processes.push(interpreter);
     for (stage, name) in processes.into_iter().zip(stage_names.into_iter()) {
-        run_stage(&mut buf, &mut err, stage, name, timeout)?;
+        let temp_file: Option<&str> = if name == INTERPRETER {
+            None
+        } else {
+            Some(&temp_file)
+        };
+        run_stage(&mut buf, &mut err, stage, name, timeout, temp_file)?;
         err.push(b'\n');
     }
     match (std::fs::read_to_string(&out_file), String::from_utf8(err)) {
@@ -105,8 +112,13 @@ fn run_stage(
     mut stage: Command,
     name: String,
     timeout: Duration,
+    temp_file: Option<&str>,
 ) -> Result<(), RunnerError> {
-    // (default pipe buffer is 16 pages or 65,536 bytes)
+    if let Some(temp_file) = temp_file {
+        stage.stdout(Stdio::from(File::create(temp_file).map_err(|x| {
+            RunnerError::FileError(format!("Error creating temp file: {x}"))
+        })?));
+    }
     let mut child = stage
         .spawn()
         .unwrap_or_else(|_| panic!("Failed to spawn {name}"));
@@ -131,7 +143,14 @@ fn run_stage(
         Err(e) => return Err(RunnerError::WaitingError(format!("{e}"), name)),
     }
     buf.clear();
-    if let Some(mut stdout) = child.stdout {
+    if let Some(temp_file) = temp_file {
+        *buf = std::fs::read_to_string(temp_file)
+            .map_err(|e| {
+                RunnerError::FileError(format!("Error reading temp file: {e}"))
+            })?
+            .as_bytes()
+            .to_owned();
+    } else if let Some(mut stdout) = child.stdout {
         stdout.read_to_end(buf).unwrap();
     }
     if let Some(mut stderr) = child.stderr {
@@ -179,7 +198,7 @@ pub fn differential_test(
     first_args.extend(brili_args.clone());
     run_prog(prog_json, None, first_args, timeout, &format!("{out_base}_real")).map_or_else(|_| {
         eprintln!(
-            "Error running program through interpreter. This is likely a bug in the fuzzer"
+            "\nError running program through interpreter. This is likely a bug in the fuzzer"
         );
         TestResult::Success
     }, |res| match run_prog(

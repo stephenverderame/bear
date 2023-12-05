@@ -28,11 +28,11 @@ mod test;
 struct Args {
     stages: Vec<String>,
 
+    /// Specify this option to just print a random BareC program
     #[clap(long, short)]
     sample: bool,
 }
 
-#[allow(clippy::too_many_lines)]
 fn main() {
     let cli = Args::parse();
     let stages = cli_to_stages(cli.stages);
