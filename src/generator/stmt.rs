@@ -14,7 +14,7 @@ use super::{
     control_flow,
     expr::{gen_aexpr, gen_bexpr},
     get_rand_avar, get_rand_bvar, get_rand_mutable_avar, get_rand_mutable_bvar,
-    rnd, Distribs, ExprInfo, StepType, Type, EXPR_FUEL,
+    rnd, Complexity, Distribs, ExprInfo, StepType, Type, EXPR_FUEL,
 };
 
 /// Generates an assignment statement, updating the context accordingly
@@ -74,6 +74,7 @@ fn gen_throw<P: StatementPCFG>(
     ctx: &mut Context,
     distribs: &mut Distribs,
     funcs: &mut FuncList,
+    complexity: &mut Complexity,
 ) -> StatementEnum {
     if let Some((idx, typ)) = ctx.rand_catch(&distribs.uniform) {
         ctx.set_throw();
@@ -103,7 +104,7 @@ fn gen_throw<P: StatementPCFG>(
             Type::Void => StatementEnum::Statement(Statement::Throw(idx, None)),
         }
     } else {
-        gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
+        gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None, complexity)
     }
 }
 
@@ -201,6 +202,7 @@ pub(super) fn gen_stmt<P: StatementPCFG>(
     distribs: &mut Distribs,
     funcs: &mut FuncList,
     idx: Option<usize>,
+    complexity: &mut Complexity,
 ) -> StatementEnum {
     let idx = if ctx.is_dead() {
         Statement::ASSIGN_IDX
@@ -215,37 +217,55 @@ pub(super) fn gen_stmt<P: StatementPCFG>(
         Statement::ASSIGN_IDX => StatementEnum::Statement(gen_assign(
             pcfg, expr_pcfg, ctx, distribs, funcs,
         )),
-        Statement::RET_IDX if ctx.ret_type() == Type::Int => {
+        Statement::RET_IDX => {
+            gen_ret(pcfg, expr_pcfg, ctx, distribs, funcs, complexity)
+        }
+        Statement::THROW_IDX => {
+            gen_throw(pcfg, expr_pcfg, ctx, distribs, funcs, complexity)
+        }
+        Statement::PRINT_IDX => gen_print(ctx).unwrap_or_else(|| {
+            gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None, complexity)
+        }),
+        // TODO
+        Statement::PCALL_IDX => {
+            gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None, complexity)
+        }
+        x => gen_loop_stmt(ctx, x, &expr_pcfg.a_expr, distribs, funcs)
+            .unwrap_or_else(|| {
+                gen_stmt(
+                    pcfg, expr_pcfg, ctx, distribs, funcs, None, complexity,
+                )
+            }),
+    }
+}
+
+/// Generates a return if we can, otherwise generates a statement
+fn gen_ret<P: StatementPCFG>(
+    pcfg: &P,
+    expr_pcfg: &ExprPCFG,
+    ctx: &mut Context,
+    distribs: &mut Distribs,
+    funcs: &mut FuncList,
+    complexity: &mut Complexity,
+) -> StatementEnum {
+    if complexity.stmts >= complexity.min_stmts {
+        if ctx.ret_type() == Type::Bool {
+            let (expr, _) =
+                gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
+            ctx.set_return();
+            StatementEnum::Statement(Statement::Ret(Some(Expr::BExpr(expr))))
+        } else if ctx.ret_type() == Type::Int {
             let (expr, info) =
                 gen_aexpr(&expr_pcfg.a_expr, ctx, distribs, funcs, EXPR_FUEL);
             ctx.union_ret_rng(info.interval);
             ctx.set_return();
             StatementEnum::Statement(Statement::Ret(Some(Expr::AExpr(expr))))
-        }
-        Statement::RET_IDX if ctx.ret_type() == Type::Bool => {
-            let (expr, _) =
-                gen_bexpr(expr_pcfg, ctx, distribs, funcs, EXPR_FUEL);
-            ctx.set_return();
-            StatementEnum::Statement(Statement::Ret(Some(Expr::BExpr(expr))))
-        }
-        Statement::RET_IDX => {
+        } else {
             ctx.set_return();
             StatementEnum::Statement(Statement::Ret(None))
         }
-        Statement::THROW_IDX => {
-            gen_throw(pcfg, expr_pcfg, ctx, distribs, funcs)
-        }
-        Statement::PRINT_IDX => gen_print(ctx).unwrap_or_else(|| {
-            gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
-        }),
-        // TODO
-        Statement::PCALL_IDX => {
-            gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
-        }
-        x => gen_loop_stmt(ctx, x, &expr_pcfg.a_expr, distribs, funcs)
-            .unwrap_or_else(|| {
-                gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None)
-            }),
+    } else {
+        gen_stmt(pcfg, expr_pcfg, ctx, distribs, funcs, None, complexity)
     }
 }
 

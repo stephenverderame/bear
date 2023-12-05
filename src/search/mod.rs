@@ -5,7 +5,7 @@ use std::{
     panic,
     sync::{
         atomic::{self, AtomicBool, AtomicU64, Ordering},
-        mpsc::channel,
+        mpsc::{channel, Receiver},
         Arc, Barrier, RwLock,
     },
     thread,
@@ -31,23 +31,14 @@ use self::trace::{BehaviorVec, FailureType};
 
 mod trace;
 
-/// Size of the population. This is the nominal population size, but the actual
-/// number of tests run per generation is `POPULATION_SIZE * TRIALS_PER_PCFG`.
-const POPULATION_SIZE: usize = 10;
 /// Number of nearest neighbors to consider when calculating novelty
 const K: usize = 8;
-/// Number of individuals to select from each population
-const SELECT_SIZE: usize = POPULATION_SIZE / 3;
 /// Number of trials to run per pcfg
 const TRIALS_PER_PCFG: usize = 3;
 /// Chance to crossover two pcfgs
 const CROSSOVER_RATE: f64 = 0.6;
 /// Chance to mutate a pcfg
 const MUTATION_RATE: f64 = 0.25;
-/// Maximum number of mutations to perform on a pcfg
-const MAX_NUM_MUTATIONS: usize = 10;
-/// Max slices to swap during a single crossover
-const MAX_NUM_CROSSES: usize = 5;
 /// Range of mutation delta
 const MUT_DELTA: RangeInclusive<f64> = -0.1..=0.1;
 /// Chance to mutate a probability by `MUT_DELTA`
@@ -56,14 +47,8 @@ const MUT_DELTA_CHANCE: f64 = 0.6;
 // const MUT_SWAP_CHANCE: f64 = 0.4;
 /// Novelty threshold at which to save a behavior vector
 const NOVELTY_THRESH: f64 = 1.0;
-/// Number of independent populations
-const POPULATIONS: usize = 8;
 /// Number of local generations before sharing DNA across populations
 const GENS_TO_CROSS_POP: u64 = 8;
-/// Number of tests to generate from a population before saving the test
-const DEBUG_OUT_TEST_NUM: u64 = 100;
-/// Number of generations to generate from a population before saving selected parents
-const DEBUG_OUT_GEN_NUM: u64 = 1;
 
 /// The archive all the most novel individuals.
 #[allow(clippy::vec_box)]
@@ -128,6 +113,7 @@ impl SharedStats {
     }
 }
 
+/// Local stats for a single population
 #[derive(Default)]
 struct LocalStats {
     pub test_count: u64,
@@ -135,9 +121,31 @@ struct LocalStats {
     pub gen_count: u64,
 }
 
-/// Runs the novelty search algorithm on the given pipeline of compiler stages.
-pub fn find_bugs(test_pipeline: &[CompilerStage]) {
-    let archive = Arc::new(RwLock::new(Archive::new()));
+/// Search params for all populations
+#[derive(Clone, Debug)]
+pub struct SearchParams {
+    pub threads: usize,
+    pub log_novelties: u64,
+    pub log_tests: u64,
+    pub max_num_mutations: usize,
+    pub max_num_crosses: usize,
+    pub pop_size: usize,
+    pub select_size: usize,
+}
+
+/// Search params for a single population
+struct PopParams {
+    global: SearchParams,
+    pop_idx: usize,
+}
+
+impl PopParams {
+    const fn new(global: SearchParams, pop_idx: usize) -> Self {
+        Self { global, pop_idx }
+    }
+}
+
+fn setup_handlers() -> Receiver<()> {
     let (tx, rx) = channel();
     ctrlc::set_handler(move || {
         tx.send(()).unwrap();
@@ -149,21 +157,30 @@ pub fn find_bugs(test_pipeline: &[CompilerStage]) {
         old(info);
         std::process::exit(1);
     }));
+    rx
+}
+
+/// Runs the novelty search algorithm on the given pipeline of compiler stages.
+pub fn find_bugs(test_pipeline: &[CompilerStage], params: &SearchParams) {
+    let archive = Arc::new(RwLock::new(Archive::new()));
     let stats = Arc::new(SharedStats::new());
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let cross_pop_genomes: Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>> =
-        Arc::new(RwLock::new(std::array::from_fn(|_| None)));
-    let cross_pop_barrier = Arc::new(Barrier::new(POPULATIONS));
+    let cross_pop_genomes: Arc<RwLock<Vec<Option<TopPCFG>>>> = Arc::new(
+        RwLock::new(std::iter::repeat(None).take(params.threads).collect()),
+    );
+    let rx = setup_handlers();
+    let cross_pop_barrier = Arc::new(Barrier::new(params.threads));
     std::fs::create_dir_all("bugs").unwrap();
     let mut threads = vec![];
-    for i in 0..POPULATIONS {
+    for i in 0..params.threads {
         let a = archive.clone();
         let t = test_pipeline.to_vec();
         let st = stats.clone();
         let bar = cross_pop_barrier.clone();
         let cpg = cross_pop_genomes.clone();
+        let params = PopParams::new(params.clone(), i);
         threads.push(thread::spawn(move || {
-            population_search(&a, i, &st, &t, &bar, &cpg);
+            population_search(&a, &params, &st, &t, &bar, &cpg);
         }));
     }
     loop {
@@ -189,11 +206,11 @@ pub fn find_bugs(test_pipeline: &[CompilerStage]) {
 /// Performs novelty search for a single population.
 fn population_search(
     archive: &Arc<RwLock<Archive>>,
-    pop_idx: usize,
+    params: &PopParams,
     stats: &Arc<SharedStats>,
     test_pipeline: &[CompilerStage],
     cross_pop_barrier: &Arc<Barrier>,
-    cross_pop_genomes: &Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>>,
+    cross_pop_genomes: &Arc<RwLock<Vec<Option<TopPCFG>>>>,
 ) {
     let args = vec![
         FArg::int("a", 0, 100),
@@ -203,7 +220,7 @@ fn population_search(
         FArg::bool("e"),
     ];
     let mut pop = std::iter::repeat_with(random_pcfg)
-        .take(POPULATION_SIZE)
+        .take(params.global.pop_size)
         .collect::<Vec<_>>();
     let mut local_gens = 0_u64;
     let mut local_shares = 0_u64;
@@ -216,7 +233,7 @@ fn population_search(
             &args,
             test_pipeline,
             stats,
-            pop_idx,
+            params,
             &mut local_stats,
         );
         local_gens += 1;
@@ -224,7 +241,7 @@ fn population_search(
             local_shares += 1;
             share_dna_across_pops(
                 &mut pop,
-                pop_idx,
+                params,
                 cross_pop_barrier,
                 cross_pop_genomes,
                 &mut waited,
@@ -250,22 +267,22 @@ fn population_search(
 /// their shared genomes. Purely for performance.
 fn share_dna_across_pops(
     pop: &mut [TopPCFG],
-    pop_idx: usize,
+    params: &PopParams,
     cross_pop_barrier: &Arc<Barrier>,
-    cross_pop_genomes: &Arc<RwLock<[Option<TopPCFG>; POPULATIONS]>>,
+    cross_pop_genomes: &Arc<RwLock<Vec<Option<TopPCFG>>>>,
     waited: &mut bool,
 ) {
     let mutating_individual =
-        Uniform::new(0, POPULATION_SIZE).sample(&mut rnd::get_rng());
-    cross_pop_genomes.write().unwrap()[pop_idx] =
+        Uniform::new(0, params.global.pop_size).sample(&mut rnd::get_rng());
+    cross_pop_genomes.write().unwrap()[params.pop_idx] =
         Some(pop[mutating_individual].clone());
     if !*waited {
         cross_pop_barrier.wait();
         *waited = true;
     }
-    let u = Uniform::new(0, POPULATIONS);
+    let u = Uniform::new(0, params.global.threads);
     let mut s = u.sample(&mut rnd::get_rng());
-    while s == pop_idx {
+    while s == params.pop_idx {
         s = u.sample(&mut rnd::get_rng());
     }
     pop[mutating_individual] = single_reproduce(
@@ -274,6 +291,7 @@ fn share_dna_across_pops(
             cross_pop_genomes.read().unwrap()[s].clone().unwrap(),
         ],
         &Uniform::new(0.0, 1.0),
+        params,
     );
 }
 
@@ -292,25 +310,16 @@ fn novelty_search_generation(
     args: &[FArg],
     test_pipeline: &[CompilerStage],
     stats: &Arc<SharedStats>,
-    pop_idx: usize,
+    params: &PopParams,
     local_stats: &mut LocalStats,
 ) -> Vec<TopPCFG> {
+    let pop_idx = params.pop_idx;
     let mut temp = vec![];
     for (i, pcfg) in pop.iter().enumerate() {
         for _ in 0..TRIALS_PER_PCFG {
-            let brc = generator::gen_function(pcfg, args);
-            let prog = lowering::lower(brc.clone());
-            let bril = to_prog(prog.to_src(true));
-            let prog = serde_json::to_string(&bril).unwrap();
             let prog_args = gen_main_args(args);
-            let result = differential_test(
-                &prog,
-                test_pipeline,
-                prog_args.clone(),
-                Duration::from_secs(20),
-                Some(&format!("out/rt_{pop_idx}.trace")),
-                &format!("out/out_{pop_idx}"),
-            );
+            let (brc, prog, result) =
+                gen_good_test(pcfg, args, test_pipeline, &prog_args, pop_idx);
             temp.push((
                 i,
                 BehaviorVec::new(
@@ -318,18 +327,15 @@ fn novelty_search_generation(
                     FailureType::from(&result),
                 ),
             ));
-            out_test_files(stats, &result, &brc, &prog, &prog_args, pop_idx);
-            if local_stats.test_count % DEBUG_OUT_TEST_NUM == 0 {
-                std::fs::write(
-                    format!(
-                        "out/test_{pop_idx}_{}.brc",
-                        local_stats.save_count
-                    ),
-                    display(&brc),
-                )
-                .unwrap();
-                local_stats.save_count += 1;
-            }
+            debug_search(
+                stats,
+                params,
+                local_stats,
+                &brc,
+                &prog,
+                &prog_args,
+                &result,
+            );
             local_stats.test_count += 1;
             stats.test_count.fetch_add(1, atomic::Ordering::SeqCst);
             if stats.stop_flag.load(atomic::Ordering::SeqCst) {
@@ -338,11 +344,81 @@ fn novelty_search_generation(
         }
     }
     local_stats.gen_count += 1;
-    let r: Vec<_> = select(temp, archive, stats, local_stats, pop_idx)
+    let r: Vec<_> = select(temp, archive, stats, local_stats, params)
         .iter()
         .map(|(pop_id, _)| pop[*pop_id].clone())
         .collect();
-    reproduce(&r)
+    reproduce(&r, params)
+}
+
+/// Generates a good test. Repeatedly trying until the test at least
+/// can be run through the interpreter without error.
+/// # Returns
+/// A tuple containing the test in brc, the BRIL program as json,
+/// and the test result.
+fn gen_good_test(
+    pcfg: &TopPCFG,
+    args: &[FArg],
+    test_pipeline: &[CompilerStage],
+    prog_args: &[String],
+    pop_idx: usize,
+) -> (Vec<Block<Statement>>, String, TestResult) {
+    let mut result;
+    let mut brc;
+    let mut prog;
+    let mut prog_str;
+    let mut bril;
+    let mut count = 1;
+    loop {
+        if count >= 3 {
+            eprintln!("\nFailed to generate a test which passes baseline after {} tries!\n \
+                      This is likely a bug in the fuzzer", count - 1);
+        }
+        brc = generator::gen_function(pcfg, args);
+        prog = lowering::lower(brc.clone());
+        bril = to_prog(prog.to_src(true));
+        prog_str = serde_json::to_string(&bril).unwrap();
+        result = differential_test(
+            &prog_str,
+            test_pipeline,
+            prog_args.to_vec(),
+            Duration::from_secs(20),
+            Some(&format!("out/rt_{pop_idx}.trace")),
+            &format!("out/out_{pop_idx}"),
+        );
+        count += 1;
+        if result.is_some() {
+            break;
+        }
+    }
+    (brc, prog_str, result.unwrap())
+}
+
+/// Writes the test files to the out directory, if the test fails.
+/// Also logs the test files every `params.log_tests` tests.
+fn debug_search(
+    stats: &Arc<SharedStats>,
+    params: &PopParams,
+    local_stats: &mut LocalStats,
+    brc: &[Block<Statement>],
+    prog: &str,
+    prog_args: &[String],
+    result: &TestResult,
+) {
+    out_test_files(stats, result, brc, prog, prog_args, params.pop_idx);
+    if params.global.log_tests > 0
+        && local_stats.test_count % params.global.log_tests == 0
+    {
+        std::fs::write(
+            format!(
+                "out/test_{}_{}.brc",
+                params.pop_idx, local_stats.save_count
+            ),
+            display(brc),
+        )
+        .unwrap();
+        local_stats.save_count += 1;
+    }
 }
 
 /// An element which is ordered by its average distance to its k-nearest neighbors
@@ -418,7 +494,7 @@ fn select(
     archive: &Arc<RwLock<Archive>>,
     stats: &Arc<SharedStats>,
     local_stats: &LocalStats,
-    pop_idx: usize,
+    params: &PopParams,
 ) -> Vec<(usize, BehaviorVec)> {
     let old_len = gen.len();
     assert!(gen.len() % TRIALS_PER_PCFG == 0);
@@ -451,10 +527,21 @@ fn select(
             }
         }
     }
-    assert_eq!(distances.len(), gen.len());
     for e in to_save {
         archive.write().unwrap().add_point(e);
     }
+    gen_select_set(&distances, gen, params, local_stats)
+}
+
+/// Selects `params.select_size` elements from `gen` probabilistically, weighted by their
+/// novelty (`distances`). Also saves the debug files of the novelty.
+fn gen_select_set(
+    distances: &[HeapElem],
+    gen: Vec<(usize, BehaviorVec)>,
+    params: &PopParams,
+    local_stats: &LocalStats,
+) -> Vec<(usize, BehaviorVec)> {
+    assert_eq!(distances.len(), gen.len());
     let sum: f64 = distances.iter().map(|e| e.dist).sum();
     let sum = sum.max(f64::EPSILON);
 
@@ -464,10 +551,14 @@ fn select(
         .collect();
 
     let r: Vec<_> = res
-        .choose_multiple_weighted(&mut rnd::get_rng(), SELECT_SIZE, |e| e.1)
+        .choose_multiple_weighted(
+            &mut rnd::get_rng(),
+            params.global.select_size,
+            |e| e.1,
+        )
         .unwrap()
         .collect();
-    debug_out_novelties(&r, sum, local_stats, pop_idx);
+    debug_out_novelties(&r, sum, local_stats, params);
     r.into_iter()
         .map(|((pcfg_idx, bv), _)| (*pcfg_idx, bv.clone()))
         .collect()
@@ -482,10 +573,11 @@ fn debug_out_novelties(
     selected: &[&((usize, BehaviorVec), f64)],
     sum: f64,
     local_stats: &LocalStats,
-    pop_idx: usize,
+    params: &PopParams,
 ) {
-    #[allow(clippy::modulo_one)]
-    if local_stats.gen_count % DEBUG_OUT_GEN_NUM == 0 {
+    if params.global.log_novelties > 0
+        && local_stats.gen_count % params.global.log_novelties == 0
+    {
         let mut out_str = String::new();
         for ((_pcfg_idx, bv), normalized_dist) in selected {
             let dist = normalized_dist * sum;
@@ -493,7 +585,10 @@ fn debug_out_novelties(
             out_str += &format!("dist: {dist}\nprob: {normalized_dist}\n{bv:#?}\nbv: {vec:#?}\n\n");
         }
         std::fs::write(
-            format!("out/novelties_{pop_idx}_{}.txt", local_stats.gen_count),
+            format!(
+                "out/novelties_{}_{}.txt",
+                params.pop_idx, local_stats.gen_count
+            ),
             out_str,
         )
         .unwrap();
@@ -545,37 +640,43 @@ fn out_test_files(
 }
 
 /// Creates a new population of `POPULATION_SIZE` `TopPCFG`s from the survivors.
-fn reproduce(survivors: &[TopPCFG]) -> Vec<TopPCFG> {
+fn reproduce(survivors: &[TopPCFG], params: &PopParams) -> Vec<TopPCFG> {
     let mut new_pop = vec![];
     let u = Uniform::new(0.0, 1.0);
-    while new_pop.len() < POPULATION_SIZE {
-        new_pop.push(single_reproduce(survivors, &u));
+    while new_pop.len() < params.global.pop_size {
+        new_pop.push(single_reproduce(survivors, &u, params));
     }
     new_pop
 }
 
 /// Creates a new `TopPCFG` from the survivors. Requires `survivors` to have
 /// at least two elements.
-fn single_reproduce(survivors: &[TopPCFG], u: &Uniform<f64>) -> TopPCFG {
+fn single_reproduce(
+    survivors: &[TopPCFG],
+    u: &Uniform<f64>,
+    params: &PopParams,
+) -> TopPCFG {
     let samp = u.sample(&mut rnd::get_rng());
     if samp < CROSSOVER_RATE {
         let parents: Vec<_> =
             survivors.choose_multiple(&mut rnd::get_rng(), 2).collect();
-        crossover(parents[0], parents[1])
+        crossover(parents[0], parents[1], params)
     } else if samp < CROSSOVER_RATE + MUTATION_RATE {
-        mutate(survivors.choose(&mut rnd::get_rng()).unwrap())
+        mutate(survivors.choose(&mut rnd::get_rng()).unwrap(), params)
     } else {
         survivors.choose(&mut rnd::get_rng()).unwrap().clone()
     }
 }
 
 /// Performs crossover on two `TopPCFG`s to get a child pcfg.
-fn crossover(a: &TopPCFG, b: &TopPCFG) -> TopPCFG {
+fn crossover(a: &TopPCFG, b: &TopPCFG, params: &PopParams) -> TopPCFG {
     let f = a.serialize(vec![]);
     let g = b.serialize(vec![]);
     let mut f_flat = flatten_pcfg(&f);
     let mut g_flat = flatten_pcfg(&g);
-    for _ in 0..Uniform::new(1, MAX_NUM_CROSSES).sample(&mut rnd::get_rng()) {
+    for _ in 0..Uniform::new(1, params.global.max_num_crosses)
+        .sample(&mut rnd::get_rng())
+    {
         let begin =
             Uniform::new(0, g_flat.len() - 1).sample(&mut rnd::get_rng());
         let end = Uniform::new(1, g_flat.len() - begin)
@@ -589,11 +690,13 @@ fn crossover(a: &TopPCFG, b: &TopPCFG) -> TopPCFG {
 }
 
 /// Performs mutation on a `TopPCFG` to get a child pcfg.
-fn mutate(a: &TopPCFG) -> TopPCFG {
+fn mutate(a: &TopPCFG, params: &PopParams) -> TopPCFG {
     let f = a.serialize(vec![]);
     let mut f_flat = flatten_pcfg(&f);
     let b = Uniform::new(0.0, 1.0);
-    for _ in 0..Uniform::new(1, MAX_NUM_MUTATIONS).sample(&mut rnd::get_rng()) {
+    for _ in 0..Uniform::new(1, params.global.max_num_mutations)
+        .sample(&mut rnd::get_rng())
+    {
         let u = Uniform::new(0, f_flat.len() - 1);
         let idx = u.sample(&mut rnd::get_rng());
         let sample = b.sample(&mut rnd::get_rng());

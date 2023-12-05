@@ -23,11 +23,17 @@ use crate::{bare_c::AExpr, pcfg::TopPCFG};
 use self::context::Context;
 pub use self::stmt::{StatementEnum, StatementTy};
 
+/// Max depth of a nested expression
 const EXPR_FUEL: usize = 4;
+/// Max depth of a control-flow structure
 const STMT_FUEL: usize = 3;
 /// Maximum total amount of loop iteration a loop nest can have
 const LOOP_MAX_ITER: u64 = 8_000;
+/// Maximum number of control-flow structures (ifs, loops, etc) in a program
 const BLOCK_LIMIT: usize = 20;
+/// Minimum number of statements in a program before the top level
+/// function can stop or a return can be generated
+const MIN_STMTS: usize = 4;
 
 /// Bare C types
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, EnumCount, Indexable)]
@@ -280,6 +286,25 @@ impl FArg {
     }
 }
 
+/// Program-wide complexity information
+pub struct Complexity {
+    pub blocks_left: usize,
+    pub stmts: usize,
+    pub min_stmts: usize,
+    pub top_level: bool,
+}
+
+impl Complexity {
+    const fn new(complexity: usize, min_stmts: usize) -> Self {
+        Self {
+            blocks_left: complexity,
+            stmts: 0,
+            min_stmts,
+            top_level: true,
+        }
+    }
+}
+
 pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
     let mut funcs = FuncList::new();
     let mut ctx = Context::make_root();
@@ -291,7 +316,6 @@ pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
             FArg::Bool { name } => ctx.new_bvar(name, vec![]),
         }
     }
-    let mut block_limit = BLOCK_LIMIT;
     control_flow::gen_blocks(
         &pcfg.block,
         pcfg,
@@ -299,7 +323,7 @@ pub fn gen_function(pcfg: &TopPCFG, args: &[FArg]) -> Vec<Block<Statement>> {
         &mut Distribs::new(pcfg),
         &mut funcs,
         STMT_FUEL,
-        &mut block_limit,
+        &mut Complexity::new(BLOCK_LIMIT, MIN_STMTS),
     )
 }
 

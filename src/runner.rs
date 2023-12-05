@@ -184,7 +184,8 @@ pub fn gen_main_args(args: &[FArg]) -> Vec<String> {
 /// Stores stdout temporarily in `out/real.out` and `out/test.out`.
 ///
 /// # Returns
-/// `true` if the program passes the differential test, `false` otherwise.
+/// `None` if the program fails to run through the interpreter, otherwise
+/// returns the test results.
 pub fn differential_test(
     prog_json: &str,
     pipeline: &[CompilerStage],
@@ -192,7 +193,7 @@ pub fn differential_test(
     timeout: Duration,
     trace_out: Option<&str>,
     out_base: &str,
-) -> TestResult {
+) -> Option<TestResult> {
     let mut first_args = trace_out
         .map_or_else(Vec::new, |out| vec![String::from("-t"), out.to_string()]);
     first_args.extend(brili_args.clone());
@@ -200,8 +201,8 @@ pub fn differential_test(
         eprintln!(
             "\nError running program through interpreter. This is likely a bug in the fuzzer"
         );
-        TestResult::Success
-    }, |res| match run_prog(
+        None
+    }, |res| Some(match run_prog(
             prog_json,
             Some(pipeline),
             brili_args,
@@ -213,7 +214,7 @@ pub fn differential_test(
                 expected: res,
                 actual,
             },
-        })
+        }))
 }
 
 /// The result of a differential test
